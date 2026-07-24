@@ -1,16 +1,21 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/book.dart';
+import '../../core/pdf/pdf_document_tools.dart';
+import '../../core/pdf/pdf_source.dart';
+import '../../core/storage/library_store.dart';
+import '../../core/storage/pdf_hash.dart';
 import '../../core/theme/app_theme.dart';
 
 /// The collections shown in the sidebar (desktop) / bottom nav (mobile).
 ///
-/// Phase 1 treats these as visual/highlight-only filters — there is no
-/// favorites/recent tracking yet, so selecting one just changes which nav
-/// item is highlighted.
+/// Phase 1.1 still treats these as visual/highlight-only filters — there is
+/// no favorites/recent tracking yet, so selecting one just changes which
+/// nav item is highlighted.
 enum LibraryCollection { allBooks, favorites, recent }
 
 extension LibraryCollectionLabel on LibraryCollection {
@@ -54,50 +59,138 @@ final selectedBookProvider = NotifierProvider<SelectedBookNotifier, Book?>(
   SelectedBookNotifier.new,
 );
 
-/// Holds the library's book list: a handful of mock entries to make the
-/// dashboard look populated, plus whatever real PDFs the user has opened
-/// from disk during this session (Phase 1 has no persistence, so this
-/// resets on every app restart).
-class LibraryNotifier extends Notifier<List<Book>> {
-  @override
-  List<Book> build() => _mockBooks;
+/// The [LibraryStore] singleton. Overridden in `main()` with a real
+/// instance backed by an already-initialized [SharedPreferences] — the
+/// default here only exists so the provider graph type-checks before that
+/// override is applied.
+final libraryStoreProvider = Provider<LibraryStore>((ref) {
+  throw UnimplementedError(
+    'libraryStoreProvider must be overridden in main() with a real LibraryStore',
+  );
+});
 
-  /// Opens the platform file picker restricted to PDFs and, if the user
-  /// picks one, prepends a new [Book] entry for it to the library.
+/// Holds the library's book list: whatever was persisted locally (via
+/// [LibraryStore]) plus the bundled sample book, loaded once in `main()`
+/// before `runApp` so the very first frame already shows real data — no
+/// hardcoded mock entries.
+class LibraryNotifier extends Notifier<List<Book>> {
+  LibraryNotifier([this._initialBooks = const []]);
+
+  final List<Book> _initialBooks;
+
+  @override
+  List<Book> build() => _initialBooks;
+
+  LibraryStore get _store => ref.read(libraryStoreProvider);
+
+  /// Opens the platform file picker restricted to PDFs.
   ///
-  /// Returns the newly created [Book], or null if the user cancelled the
-  /// picker or the picked file had no usable source.
+  /// If the picked file's content hash matches a book already in the
+  /// library (e.g. a desktop file that moved, or a web re-pick after a
+  /// reload lost its in-memory bytes), the existing entry is refreshed in
+  /// place instead of duplicated, so progress carries over. Returns the
+  /// resulting [Book], or null if the user cancelled the picker.
   Future<Book?> openLocalPdf() async {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['pdf'],
-      withReadStream: false,
+      // Reading bytes on every platform (not just web) keeps content
+      // hashing and cover-thumbnail rendering simple and uniform, at the
+      // cost of reading the file into memory once at pick time.
+      withData: true,
     );
     if (result == null || result.files.isEmpty) return null;
 
     final file = result.files.first;
     final Uint8List? bytes = file.bytes;
+    if (bytes == null) return null;
     final String? path = file.path;
-    if (bytes == null && path == null) return null;
 
-    final title = _titleFromFileName(file.name);
-    final book = Book(
-      id: 'local-${DateTime.now().microsecondsSinceEpoch}',
-      title: title,
-      author: 'Opened from device',
-      progress: 0,
-      currentPage: 1,
-      pageCount: 0,
-      coverGradient: kCoverGradients[state.length % kCoverGradients.length],
-      filePath: path,
-      fileBytes: bytes,
-    );
-    state = [book, ...state];
+    final id = contentIdForBytes(bytes);
+    final source = PdfSource.data(bytes, name: file.name);
+    final pageCount = await readPdfPageCount(source);
+
+    final existingIndex = state.indexWhere((b) => b.id == id);
+    final Book book;
+    if (existingIndex != -1) {
+      book = state[existingIndex].copyWith(
+        pageCount: pageCount > 0 ? pageCount : state[existingIndex].pageCount,
+        filePath: path,
+        fileBytes: bytes,
+        openedOnWeb: path == null,
+        lastOpenedAt: DateTime.now(),
+      );
+    } else {
+      book = Book(
+        id: id,
+        title: _titleFromFileName(file.name),
+        author: 'Opened from device',
+        pageCount: pageCount,
+        currentPage: 1,
+        coverGradientIndex: state.length % kCoverGradients.length,
+        filePath: path,
+        fileBytes: bytes,
+        openedOnWeb: path == null,
+        lastOpenedAt: DateTime.now(),
+      );
+    }
+
+    state = [book, for (final b in state) if (b.id != id) b];
+    unawaited(_store.upsert(book));
+    unawaited(_ensureThumbnail(book));
     return book;
   }
 
+  /// Records reading progress for [bookId] (a content id) and persists it
+  /// immediately. No-ops if the book isn't in the library (e.g. it was
+  /// removed) or nothing actually changed.
+  void recordProgress(
+    String bookId, {
+    required int currentPage,
+    required int pageCount,
+  }) {
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+
+    final existing = state[index];
+    final resolvedPageCount = pageCount > 0 ? pageCount : existing.pageCount;
+    if (existing.currentPage == currentPage &&
+        existing.pageCount == resolvedPageCount) {
+      return;
+    }
+
+    final updated = existing.copyWith(
+      currentPage: currentPage,
+      pageCount: resolvedPageCount,
+      lastOpenedAt: DateTime.now(),
+    );
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
+  /// Renders and caches the page-1 cover thumbnail for [book] if it doesn't
+  /// have one yet. Fire-and-forget: failures just leave the gradient
+  /// fallback in place.
+  Future<void> _ensureThumbnail(Book book) async {
+    if (book.coverThumbnail != null) return;
+    final source = PdfSource.fromBook(book);
+    if (source == null) return;
+
+    final thumbnail = await renderCoverThumbnail(source);
+    if (thumbnail == null) return;
+
+    final index = state.indexWhere((b) => b.id == book.id);
+    if (index == -1) return;
+    final updated = state[index].copyWith(coverThumbnail: thumbnail);
+    state = [for (final b in state) if (b.id == book.id) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
   static String _titleFromFileName(String fileName) {
-    final withoutExtension = fileName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), '');
+    final withoutExtension = fileName.replaceAll(
+      RegExp(r'\.pdf$', caseSensitive: false),
+      '',
+    );
     return withoutExtension.replaceAll(RegExp(r'[_\-]+'), ' ').trim();
   }
 }
@@ -105,60 +198,3 @@ class LibraryNotifier extends Notifier<List<Book>> {
 final libraryProvider = NotifierProvider<LibraryNotifier, List<Book>>(
   LibraryNotifier.new,
 );
-
-final _mockBooks = <Book>[
-  Book(
-    id: 'mock-1',
-    title: 'Atomic Habits',
-    author: 'James Clear',
-    progress: 0.62,
-    currentPage: 148,
-    pageCount: 238,
-    coverGradient: kCoverGradients[0],
-  ),
-  Book(
-    id: 'mock-2',
-    title: 'Deep Work',
-    author: 'Cal Newport',
-    progress: 0.31,
-    currentPage: 62,
-    pageCount: 204,
-    coverGradient: kCoverGradients[1],
-  ),
-  Book(
-    id: 'mock-3',
-    title: 'The Pragmatic Programmer',
-    author: 'David Thomas & Andrew Hunt',
-    progress: 0.85,
-    currentPage: 306,
-    pageCount: 360,
-    coverGradient: kCoverGradients[2],
-  ),
-  Book(
-    id: 'mock-4',
-    title: 'Sapiens',
-    author: 'Yuval Noah Harari',
-    progress: 0.12,
-    currentPage: 55,
-    pageCount: 443,
-    coverGradient: kCoverGradients[3],
-  ),
-  Book(
-    id: 'mock-5',
-    title: 'Designing Data-Intensive Applications',
-    author: 'Martin Kleppmann',
-    progress: 0.47,
-    currentPage: 210,
-    pageCount: 449,
-    coverGradient: kCoverGradients[4],
-  ),
-  Book(
-    id: 'mock-6',
-    title: 'Clean Architecture',
-    author: 'Robert C. Martin',
-    progress: 0,
-    currentPage: 1,
-    pageCount: 432,
-    coverGradient: kCoverGradients[0],
-  ),
-];

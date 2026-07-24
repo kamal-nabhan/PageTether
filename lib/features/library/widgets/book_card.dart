@@ -16,7 +16,7 @@ class BookCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final started = book.progress > 0;
+    final started = book.isStarted;
 
     return Card(
       child: InkWell(
@@ -51,7 +51,7 @@ class BookCard extends StatelessWidget {
                   Text(
                     started
                         ? '${book.progressPercent}% • page ${book.currentPage} of ${book.pageCount}'
-                        : '${book.pageCount} pages',
+                        : (book.pageCount > 0 ? '${book.pageCount} pages' : 'Ready to open'),
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 11),
                   ),
                   const SizedBox(height: 12),
@@ -96,10 +96,25 @@ class _CoverBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final thumbnail = book.coverThumbnail;
+
     return Container(
       decoration: BoxDecoration(gradient: book.coverGradient),
       child: Stack(
+        fit: StackFit.expand,
         children: [
+          // Real page-1 render when available; the gradient behind it (set
+          // on the outer Container) is what shows through if rendering
+          // failed or hasn't finished yet.
+          if (thumbnail != null)
+            Positioned.fill(
+              child: Image.memory(
+                thumbnail,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+              ),
+            ),
           Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
@@ -108,7 +123,7 @@ class _CoverBanner extends StatelessWidget {
                   end: Alignment.bottomCenter,
                   colors: [
                     Colors.black.withValues(alpha: 0.0),
-                    Colors.black.withValues(alpha: 0.25),
+                    Colors.black.withValues(alpha: thumbnail != null ? 0.45 : 0.25),
                   ],
                 ),
               ),

@@ -70,7 +70,7 @@ class LibrarySidebar extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.all(20),
               child: Text(
-                'Phase 1 • local PDFs only',
+                'Phase 1.1 • local PDFs only',
                 style: TextStyle(color: AppColors.textSecondary, fontSize: 11),
               ),
             ),
@@ -98,9 +98,13 @@ class _BrandHeader extends StatelessWidget {
           child: const Icon(Icons.auto_stories_rounded, color: Colors.white, size: 22),
         ),
         const SizedBox(width: 12),
-        Text(
-          'PageTether',
-          style: Theme.of(context).textTheme.titleLarge,
+        Flexible(
+          child: Text(
+            'PageTether',
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1,
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
         ),
       ],
     );

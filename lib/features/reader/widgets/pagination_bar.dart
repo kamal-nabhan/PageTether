@@ -58,6 +58,9 @@ class _PaginationBarState extends State<PaginationBar> {
               final ready = widget.controller.isReady;
               final pageCount = ready ? widget.controller.pageCount : 0;
               final pageNumber = ready ? (widget.controller.pageNumber ?? 1) : 0;
+              final percent = ready && pageCount > 0
+                  ? ((pageNumber / pageCount) * 100).round()
+                  : null;
 
               if (!_pageFieldFocus.hasFocus) {
                 final text = ready ? '$pageNumber' : '';
@@ -97,7 +100,7 @@ class _PaginationBarState extends State<PaginationBar> {
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
                     child: Text(
-                      'of ${ready ? pageCount : '-'}',
+                      'of ${ready ? pageCount : '-'}${percent != null ? ' • $percent%' : ''}',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   ),

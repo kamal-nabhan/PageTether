@@ -4,6 +4,7 @@
 credentials.json
 token.json
 *.env
+tmp
 .env
 .env.*
 # Android signing

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/book.dart';
+import '../../core/theme/app_theme.dart';
 import '../reader/reader_screen.dart';
 import 'library_providers.dart';
 import 'widgets/book_card.dart';
@@ -14,9 +15,8 @@ const double kDesktopBreakpoint = 800;
 ///
 /// Responsive by width only (no external package) — a permanent sidebar
 /// with a card grid on desktop, a bottom [NavigationBar] with a tighter
-/// grid on mobile. Book cards use mock data; opening a book (mock or real)
-/// either resumes a previously picked local file or launches the file
-/// picker so the user can choose one.
+/// grid on mobile. Every card is a real, persisted local PDF (the bundled
+/// sample book plus whatever the user has opened) — there is no mock data.
 class LibraryScreen extends ConsumerWidget {
   const LibraryScreen({super.key});
 
@@ -30,9 +30,20 @@ class LibraryScreen extends ConsumerWidget {
   }
 
   Future<void> _openBook(BuildContext context, WidgetRef ref, Book book) async {
-    if (!book.hasSource) {
-      // Mock entries have no real PDF behind them yet, so fall back to the
-      // file picker rather than pretending to open a document.
+    if (!book.hasLiveSource) {
+      // Most commonly hit on web: the browser sandbox can't reopen a local
+      // file by path after a reload, so the in-memory bytes from a prior
+      // session are gone. Rather than crash (or silently do nothing), tell
+      // the user why and hand them straight to the picker — re-selecting
+      // the same file resolves to the same content id, so progress carries
+      // over instead of creating a duplicate entry.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'This session lost access to "${book.title}". Please re-select the file to continue reading.',
+          ),
+        ),
+      );
       await _openPdf(context, ref);
       return;
     }
@@ -57,6 +68,7 @@ class LibraryScreen extends ConsumerWidget {
               ? (constraints.maxWidth / 240).floor().clamp(3, 6)
               : (constraints.maxWidth / 190).floor().clamp(2, 3),
           onOpenBook: (book) => _openBook(context, ref, book),
+          onOpenPdf: () => _openPdf(context, ref),
         );
 
         if (isDesktop) {
@@ -118,14 +130,20 @@ class _LibraryContent extends StatelessWidget {
     required this.books,
     required this.crossAxisCount,
     required this.onOpenBook,
+    required this.onOpenPdf,
   });
 
   final List<Book> books;
   final int crossAxisCount;
   final ValueChanged<Book> onOpenBook;
+  final VoidCallback onOpenPdf;
 
   @override
   Widget build(BuildContext context) {
+    if (books.isEmpty) {
+      return _EmptyLibraryView(onOpenPdf: onOpenPdf);
+    }
+
     return CustomScrollView(
       slivers: [
         SliverPadding(
@@ -166,6 +184,51 @@ class _LibraryContent extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Shown when the library has no books at all — practically only reachable
+/// if the bundled sample book failed to render on this device, since it's
+/// otherwise always seeded on first launch.
+class _EmptyLibraryView extends StatelessWidget {
+  const _EmptyLibraryView({required this.onOpenPdf});
+
+  final VoidCallback onOpenPdf;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.auto_stories_outlined,
+              size: 56,
+              color: AppColors.textSecondary,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Your library is empty',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Open a PDF from your device to get started.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: onOpenPdf,
+              icon: const Icon(Icons.file_open_rounded),
+              label: const Text('Open your first PDF'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
