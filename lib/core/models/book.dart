@@ -155,6 +155,33 @@ class Book {
     );
   }
 
+  /// Like [copyWith] but replaces [coverThumbnail] outright — including
+  /// clearing it to null — rather than only overriding it when non-null.
+  /// [copyWith]'s `newValue ?? this.coverThumbnail` pattern can never
+  /// *remove* a cover, which is exactly what "Reset cover" needs to be able
+  /// to do if re-rendering from the PDF fails (see
+  /// `LibraryNotifier.resetCover`): falling back to the gradient cover
+  /// rather than leaving a stale/custom one in place.
+  Book withCoverThumbnail(Uint8List? coverThumbnail) {
+    return Book(
+      id: id,
+      title: title,
+      author: author,
+      pageCount: pageCount,
+      currentPage: currentPage,
+      coverGradientIndex: coverGradientIndex,
+      coverThumbnail: coverThumbnail,
+      assetPath: assetPath,
+      filePath: filePath,
+      fileBytes: fileBytes,
+      openedOnWeb: openedOnWeb,
+      lastOpenedAt: lastOpenedAt,
+      source: source,
+      driveFileId: driveFileId,
+      driveSizeBytes: driveSizeBytes,
+    );
+  }
+
   /// Serializes persistent metadata only. [fileBytes] is intentionally
   /// omitted (large, session-only); [coverThumbnail] is included as base64
   /// so covers survive a restart without re-rendering.

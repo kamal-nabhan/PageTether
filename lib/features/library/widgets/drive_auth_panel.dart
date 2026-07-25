@@ -123,6 +123,14 @@ class _ConnectedRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final label = displayName ?? email ?? 'Google Drive connected';
+    // Manual reconcile-with-Drive action (see `hydrateFromDrive` in
+    // `library_providers.dart`) — reachable from both the desktop sidebar
+    // and the mobile Drive bottom sheet, since both embed this panel.
+    // Naturally hidden while signed out (this row only renders once
+    // `hasDriveAccess` is true) and disabled while a Drive sync is already
+    // in flight, rather than queuing a redundant second one.
+    final syncState = ref.watch(driveSyncProvider);
+    final isSyncing = syncState is DriveSyncLoading;
     return Row(
       children: [
         const Icon(
@@ -138,6 +146,19 @@ class _ConnectedRow extends ConsumerWidget {
             overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.bodyMedium,
           ),
+        ),
+        IconButton(
+          tooltip: 'Refresh Drive library',
+          icon: isSyncing
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.refresh_rounded, size: 18),
+          onPressed: isSyncing
+              ? null
+              : () => ref.read(libraryProvider.notifier).hydrateFromDrive(),
         ),
         IconButton(
           tooltip: 'Disconnect Google Drive',

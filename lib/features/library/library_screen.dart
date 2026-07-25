@@ -20,8 +20,61 @@ const double kDesktopBreakpoint = 800;
 /// with a card grid on desktop, a bottom [NavigationBar] with a tighter
 /// grid on mobile. Every card is a real, persisted local PDF (the bundled
 /// sample book plus whatever the user has opened) — there is no mock data.
-class LibraryScreen extends ConsumerWidget {
+class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
+
+  @override
+  ConsumerState<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+/// A [ConsumerState] (rather than a plain [ConsumerWidget]) purely so this
+/// screen can observe app lifecycle transitions via [WidgetsBindingObserver]
+/// — see [didChangeAppLifecycleState] — to auto-refresh the Drive library
+/// when the app comes back to the foreground (covers another device having
+/// added/removed a file while this one was backgrounded).
+class _LibraryScreenState extends ConsumerState<LibraryScreen>
+    with WidgetsBindingObserver {
+  /// Minimum gap between auto-refreshes triggered by resuming — otherwise
+  /// quickly alt-tabbing (desktop) or repeatedly foregrounding the app
+  /// (mobile/web tab-switching) would spam Drive with duplicate `files.list`
+  /// calls for no benefit.
+  static const _autoRefreshDebounce = Duration(seconds: 30);
+
+  DateTime? _lastAutoRefresh;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // `resumed` fires both for a real mobile/desktop foreground and — since
+    // Flutter's web engine maps the Page Visibility API onto the same
+    // lifecycle enum — for a browser tab becoming visible again, so this
+    // one check covers both "auto-refresh on resume" and "on web
+    // visibility" without platform-specific code.
+    if (state != AppLifecycleState.resumed) return;
+    _maybeAutoRefreshFromDrive();
+  }
+
+  void _maybeAutoRefreshFromDrive() {
+    final authState = ref.read(authProvider);
+    if (authState is! AuthStateSignedIn || !authState.hasDriveAccess) return;
+
+    final now = DateTime.now();
+    final last = _lastAutoRefresh;
+    if (last != null && now.difference(last) < _autoRefreshDebounce) return;
+    _lastAutoRefresh = now;
+    ref.read(libraryProvider.notifier).hydrateFromDrive();
+  }
 
   Future<void> _openPdf(BuildContext context, WidgetRef ref) async {
     final book = await ref.read(libraryProvider.notifier).openLocalPdf();
@@ -75,6 +128,14 @@ class LibraryScreen extends ConsumerWidget {
     ref.read(libraryProvider.notifier).deleteDriveBook(book.id);
   }
 
+  void _changeCover(WidgetRef ref, Book book) {
+    ref.read(libraryProvider.notifier).pickAndSetCover(book.id);
+  }
+
+  void _resetCover(WidgetRef ref, Book book) {
+    ref.read(libraryProvider.notifier).resetCover(book.id);
+  }
+
   void _openDriveSheet(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
@@ -90,7 +151,7 @@ class LibraryScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final books = ref.watch(libraryProvider);
     final selectedCollection = ref.watch(selectedCollectionProvider);
 
@@ -118,6 +179,8 @@ class LibraryScreen extends ConsumerWidget {
           onOpenBook: (book) => _openBook(context, ref, book),
           onOpenPdf: () => _openPdf(context, ref),
           onDeleteBook: (book) => _deleteDriveBook(ref, book),
+          onChangeCover: (book) => _changeCover(ref, book),
+          onResetCover: (book) => _resetCover(ref, book),
         );
 
         if (isDesktop) {
@@ -186,6 +249,8 @@ class _LibraryContent extends StatelessWidget {
     required this.onOpenBook,
     required this.onOpenPdf,
     required this.onDeleteBook,
+    required this.onChangeCover,
+    required this.onResetCover,
   });
 
   final List<Book> books;
@@ -193,6 +258,8 @@ class _LibraryContent extends StatelessWidget {
   final ValueChanged<Book> onOpenBook;
   final VoidCallback onOpenPdf;
   final ValueChanged<Book> onDeleteBook;
+  final ValueChanged<Book> onChangeCover;
+  final ValueChanged<Book> onResetCover;
 
   @override
   Widget build(BuildContext context) {
@@ -238,6 +305,10 @@ class _LibraryContent extends StatelessWidget {
                   book: book,
                   onOpen: () => onOpenBook(book),
                   onDelete: book.isDriveBook ? () => onDeleteBook(book) : null,
+                  onChangeCover: () => onChangeCover(book),
+                  onResetCover: book.hasLiveSource
+                      ? () => onResetCover(book)
+                      : null,
                 );
               },
               childCount: books.length,

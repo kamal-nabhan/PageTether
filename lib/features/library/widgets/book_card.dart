@@ -11,45 +11,29 @@ import '../../../core/theme/app_theme.dart';
 /// button reads "Download & Read" instead of "Open"/"Continue Reading" —
 /// [onOpen] is the same callback either way; `library_screen.dart` decides
 /// whether opening it means downloading first. [onDelete], when provided
-/// (Drive books only), is triggered by a long-press and shows its own
-/// confirm dialog before calling back.
+/// (Drive books only), is reachable both via a long-press (kept for
+/// backwards compatibility) and via the "⋮" overflow menu next to the
+/// title, both of which show the same confirm dialog before calling back.
+/// [onChangeCover]/[onResetCover] back the overflow menu's cover-editing
+/// actions — see `_BookCardMenu`.
 class BookCard extends StatelessWidget {
   const BookCard({
     super.key,
     required this.book,
     required this.onOpen,
     this.onDelete,
+    this.onChangeCover,
+    this.onResetCover,
   });
 
   final Book book;
   final VoidCallback onOpen;
   final VoidCallback? onDelete;
+  final VoidCallback? onChangeCover;
+  final VoidCallback? onResetCover;
 
   Future<void> _confirmDelete(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete from Drive?'),
-        content: Text(
-          '"${book.title}" will be permanently deleted from Google Drive. '
-          'This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFFEF4444),
-            ),
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) onDelete?.call();
+    if (await _confirmDeleteDialog(context, book.title)) onDelete?.call();
   }
 
   @override
@@ -72,11 +56,27 @@ class BookCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    book.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Tooltip(
+                          message: book.title,
+                          child: Text(
+                            book.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                      ),
+                      _BookCardMenu(
+                        book: book,
+                        onDelete: onDelete,
+                        onChangeCover: onChangeCover,
+                        onResetCover: onResetCover,
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 2),
                   Text(
@@ -152,90 +152,175 @@ class _CoverBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final thumbnail = book.coverThumbnail;
 
-    return Container(
-      decoration: BoxDecoration(gradient: book.coverGradient),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          // Real page-1 render when available; the gradient behind it (set
-          // on the outer Container) is what shows through if rendering
-          // failed or hasn't finished yet.
-          if (thumbnail != null)
+    // The title used to also be drawn as an overlay at the bottom of the
+    // cover, duplicating the one already shown below it in `BookCard` — the
+    // tooltip (hover on desktop/web, long-press on touch) now covers the
+    // "see the full title" need that overlay was there for, without the
+    // visual repetition.
+    return Tooltip(
+      message: book.title,
+      child: Container(
+        decoration: BoxDecoration(gradient: book.coverGradient),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Real page-1 render when available; the gradient behind it (set
+            // on the outer Container) is what shows through if rendering
+            // failed or hasn't finished yet.
+            if (thumbnail != null)
+              Positioned.fill(
+                child: Image.memory(
+                  thumbnail,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+                ),
+              ),
             Positioned.fill(
-              child: Image.memory(
-                thumbnail,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
-              ),
-            ),
-          Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.0),
-                    Colors.black.withValues(alpha: thumbnail != null ? 0.45 : 0.25),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const Positioned(
-            top: 12,
-            right: 12,
-            child: Icon(
-              Icons.picture_as_pdf_rounded,
-              color: Colors.white70,
-              size: 20,
-            ),
-          ),
-          if (book.isDriveBook)
-            Positioned(
-              top: 12,
-              left: 12,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.cloud_rounded, size: 12, color: Colors.white70),
-                    SizedBox(width: 4),
-                    Text(
-                      'Drive',
-                      style: TextStyle(color: Colors.white70, fontSize: 10),
-                    ),
-                  ],
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.0),
+                      Colors.black.withValues(alpha: thumbnail != null ? 0.45 : 0.25),
+                    ],
+                  ),
                 ),
               ),
             ),
-          Positioned(
-            left: 14,
-            bottom: 12,
-            right: 14,
-            child: Text(
-              book.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                fontSize: 16,
-                height: 1.2,
-                shadows: [Shadow(blurRadius: 6, color: Colors.black45)],
+            const Positioned(
+              top: 12,
+              right: 12,
+              child: Icon(
+                Icons.picture_as_pdf_rounded,
+                color: Colors.white70,
+                size: 20,
               ),
             ),
-          ),
-        ],
+            if (book.isDriveBook)
+              Positioned(
+                top: 12,
+                left: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_rounded, size: 12, color: Colors.white70),
+                      SizedBox(width: 4),
+                      Text(
+                        'Drive',
+                        style: TextStyle(color: Colors.white70, fontSize: 10),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
+}
+
+/// "Book options" overflow menu shown next to the title (see [BookCard]):
+/// change or reset the cover thumbnail, and — for Drive books only — delete.
+/// Hidden entirely (renders nothing) when none of its three actions could
+/// possibly apply, which in practice only happens for a book with no
+/// [onChangeCover] callback wired up at all (every call site currently wires
+/// one, so this is mostly a defensive fallback).
+class _BookCardMenu extends StatelessWidget {
+  const _BookCardMenu({
+    required this.book,
+    required this.onDelete,
+    required this.onChangeCover,
+    required this.onResetCover,
+  });
+
+  final Book book;
+  final VoidCallback? onDelete;
+  final VoidCallback? onChangeCover;
+  final VoidCallback? onResetCover;
+
+  @override
+  Widget build(BuildContext context) {
+    if (onChangeCover == null && onResetCover == null && onDelete == null) {
+      return const SizedBox.shrink();
+    }
+
+    return PopupMenuButton<_BookCardAction>(
+      tooltip: 'Book options',
+      icon: const Icon(Icons.more_vert_rounded, size: 18),
+      padding: EdgeInsets.zero,
+      onSelected: (action) async {
+        switch (action) {
+          case _BookCardAction.changeCover:
+            onChangeCover?.call();
+          case _BookCardAction.resetCover:
+            onResetCover?.call();
+          case _BookCardAction.delete:
+            if (await _confirmDeleteDialog(context, book.title)) {
+              onDelete?.call();
+            }
+        }
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem(
+          value: _BookCardAction.changeCover,
+          enabled: onChangeCover != null,
+          child: const Text('Change cover…'),
+        ),
+        PopupMenuItem(
+          value: _BookCardAction.resetCover,
+          enabled: onResetCover != null && book.hasLiveSource,
+          child: const Text('Reset cover'),
+        ),
+        if (onDelete != null)
+          const PopupMenuItem(
+            value: _BookCardAction.delete,
+            child: Text('Delete'),
+          ),
+      ],
+    );
+  }
+}
+
+enum _BookCardAction { changeCover, resetCover, delete }
+
+/// Shared "Delete from Drive?" confirmation, used both by [BookCard]'s
+/// long-press (kept for backwards compatibility) and by [_BookCardMenu]'s
+/// "Delete" item.
+Future<bool> _confirmDeleteDialog(BuildContext context, String title) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Delete from Drive?'),
+      content: Text(
+        '"$title" will be permanently deleted from Google Drive. '
+        'This cannot be undone.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFFEF4444),
+          ),
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
 }
 
 class _ProgressBar extends StatelessWidget {

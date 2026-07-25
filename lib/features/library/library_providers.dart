@@ -1,8 +1,16 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+// `DetailedApiRequestError` doesn't live under `package:googleapis/common/`
+// in this package version (16.x) — it's defined in `_discoveryapis_commons`
+// and re-exported from each API's own library, so `drive/v3.dart` (already
+// the app's one googleapis import, in `drive_service.dart`) is the correct
+// place to pull it from. `show`-only (no prefix) so it can't collide with
+// the local `drive` (a `DriveService` instance) variable used below.
+import 'package:googleapis/drive/v3.dart' show DetailedApiRequestError;
 
 import '../../core/models/book.dart';
 import '../../core/pdf/pdf_document_tools.dart';
@@ -242,12 +250,124 @@ class LibraryNotifier extends Notifier<List<Book>> {
     unawaited(_store.upsert(updated));
   }
 
+  /// Opens the platform image picker, downscales the chosen image to a
+  /// ~512px-long-edge thumbnail (see [_thumbnailFromImageBytes] — this
+  /// matters on web, where [LibraryStore] is backed by browser local
+  /// storage with a ~5MB ceiling and every cover is stored as base64), and
+  /// sets it as [bookId]'s cover via [setCustomCover]. No-ops if the user
+  /// cancels the picker or the image can't be decoded.
+  Future<void> pickAndSetCover(String bookId) async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final bytes = result.files.first.bytes;
+    if (bytes == null) return;
+
+    final thumbnail = await _thumbnailFromImageBytes(bytes);
+    if (thumbnail == null) return;
+    setCustomCover(bookId, thumbnail);
+  }
+
+  /// Sets [bookId]'s cover to the given (already-thumbnail-sized) PNG
+  /// [bytes] and persists it, mirroring how [_ensureThumbnail] persists a
+  /// rendered cover. No-ops if [bookId] isn't in the library.
+  void setCustomCover(String bookId, Uint8List bytes) {
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+    final updated = state[index].withCoverThumbnail(bytes);
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
+  /// Re-renders [bookId]'s cover from page 1 of its PDF, discarding any
+  /// custom cover set via [setCustomCover]. Only meaningful when the book
+  /// has a live PDF source right now (see [Book.hasLiveSource] — a
+  /// not-yet-downloaded Drive book has none); callers should disable the
+  /// "Reset cover" action otherwise. Falls back to the gradient cover (by
+  /// clearing [Book.coverThumbnail] to null) if rendering fails, rather than
+  /// leaving a stale cover in place — unlike [_ensureThumbnail], this is an
+  /// explicit user action, so silently doing nothing on failure would look
+  /// like a bug rather than a no-op.
+  Future<void> resetCover(String bookId) async {
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+    final source = PdfSource.fromBook(state[index]);
+    if (source == null) return;
+
+    final thumbnail = await renderCoverThumbnail(source);
+
+    final freshIndex = state.indexWhere((b) => b.id == bookId);
+    if (freshIndex == -1) return;
+    final updated = state[freshIndex].withCoverThumbnail(thumbnail);
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
+  /// Decodes [bytes] as an image and re-encodes it as PNG, downscaled so
+  /// its longer edge is at most [maxDimension] (a no-larger-than-needed
+  /// resize, not an upscale). Returns null (never throws) if the bytes
+  /// can't be decoded as an image.
+  ///
+  /// Uses `dart:ui`'s codec directly rather than pulling in an image
+  /// processing package: [ui.instantiateImageCodec]'s `targetWidth`/
+  /// `targetHeight` do the actual downsampling during decode, so this is a
+  /// single extra (cheap, since it's scoped to one user-picked image)
+  /// re-decode rather than a full-resolution decode followed by a separate
+  /// resize pass.
+  Future<Uint8List?> _thumbnailFromImageBytes(
+    Uint8List bytes, {
+    int maxDimension = 512,
+  }) async {
+    try {
+      final probeCodec = await ui.instantiateImageCodec(bytes);
+      final probeFrame = await probeCodec.getNextFrame();
+      final originalWidth = probeFrame.image.width;
+      final originalHeight = probeFrame.image.height;
+      probeFrame.image.dispose();
+      if (originalWidth <= 0 || originalHeight <= 0) return null;
+
+      final longEdge = originalWidth > originalHeight
+          ? originalWidth
+          : originalHeight;
+      final scale = longEdge > maxDimension ? maxDimension / longEdge : 1.0;
+      final targetWidth = (originalWidth * scale).round();
+      final targetHeight = (originalHeight * scale).round();
+
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: targetWidth,
+        targetHeight: targetHeight,
+      );
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      try {
+        final byteData = await image.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+        return byteData?.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Finds/creates the "PageTether Library" Drive folder and merges its
   /// PDFs into the library as `source: drive` entries, alongside whatever
   /// local books are already there. Safe to call repeatedly (e.g. every
-  /// time the user reconnects) — existing Drive entries are refreshed in
-  /// place by id (keeping any locally-cached file path and reading
-  /// progress) rather than duplicated.
+  /// time the user reconnects, hits "Refresh", or the app resumes) —
+  /// existing Drive entries are refreshed in place by id (keeping any
+  /// locally-cached file path and reading progress) rather than duplicated.
+  ///
+  /// **Authoritative for Drive books**: any local [BookSource.drive] entry
+  /// whose file id is no longer in this listing (deleted from Drive
+  /// directly, or from another device) is removed from the library too —
+  /// this is what gives cross-device deletes eventual consistency. Local
+  /// (non-Drive) books are never touched here regardless of what Drive
+  /// returns.
   Future<void> hydrateFromDrive() async {
     final syncNotifier = ref.read(driveSyncProvider.notifier);
     syncNotifier.setLoading('Loading your Drive library…');
@@ -258,6 +378,7 @@ class LibraryNotifier extends Notifier<List<Book>> {
       final drive = DriveService(client);
       final folderId = await drive.ensureLibraryFolder();
       final files = await drive.listPdfs(folderId);
+      final driveIds = {for (final file in files) 'drive:${file.id}'};
 
       final byId = {for (final b in state) b.id: b};
       for (final file in files) {
@@ -273,6 +394,9 @@ class LibraryNotifier extends Notifier<List<Book>> {
                 driveSizeBytes: incoming.driveSizeBytes,
               );
       }
+      byId.removeWhere(
+        (id, book) => book.source == BookSource.drive && !driveIds.contains(id),
+      );
 
       state = byId.values.toList()
         ..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
@@ -399,6 +523,13 @@ class LibraryNotifier extends Notifier<List<Book>> {
   /// Deletes a Drive book from Drive and removes it from the library.
   /// Returns false (and surfaces the error via [driveSyncProvider]) if
   /// [bookId] isn't a known Drive book or the delete call failed.
+  ///
+  /// A 404 from `files.delete` (the file is already gone — e.g. deleted from
+  /// another device, or a previous attempt that actually succeeded on
+  /// Drive's side before this app's local state got a chance to update) is
+  /// treated as success rather than a real error: either way, the desired
+  /// end state — this book no longer exists in Drive or the local
+  /// library — is already true.
   Future<bool> deleteDriveBook(String bookId) async {
     final index = state.indexWhere((b) => b.id == bookId);
     if (index == -1) return false;
@@ -418,6 +549,15 @@ class LibraryNotifier extends Notifier<List<Book>> {
       unawaited(_store.saveAll(state));
       syncNotifier.setIdle();
       return true;
+    } on DetailedApiRequestError catch (e) {
+      if (e.status == 404) {
+        state = [for (final b in state) if (b.id != bookId) b];
+        unawaited(_store.saveAll(state));
+        syncNotifier.setIdle();
+        return true;
+      }
+      syncNotifier.setError('Delete failed: $e');
+      return false;
     } on DriveAuthUnavailableException catch (e) {
       syncNotifier.setError(e.reason);
       return false;
