@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/book.dart';
+import '../../core/services/auth/auth_notifier.dart';
+import '../../core/services/auth/auth_state.dart';
 import '../../core/theme/app_theme.dart';
 import '../reader/reader_screen.dart';
 import 'library_providers.dart';
 import 'widgets/book_card.dart';
+import 'widgets/drive_auth_panel.dart';
 import 'widgets/library_sidebar.dart';
 
 /// Breakpoint above which the permanent sidebar replaces the bottom nav.
@@ -30,6 +33,21 @@ class LibraryScreen extends ConsumerWidget {
   }
 
   Future<void> _openBook(BuildContext context, WidgetRef ref, Book book) async {
+    if (book.isDriveBook && !book.hasLiveSource) {
+      // Drive book that hasn't been downloaded to this device yet (or, on
+      // web, whose in-memory bytes were lost to a page reload) — download
+      // it to the cache first, then open the freshly-updated Book.
+      final downloaded = await ref
+          .read(libraryProvider.notifier)
+          .downloadDriveBook(book.id);
+      if (downloaded == null || !context.mounted) return;
+      ref.read(selectedBookProvider.notifier).select(downloaded);
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(builder: (_) => ReaderScreen(book: downloaded)),
+      );
+      return;
+    }
+
     if (!book.hasLiveSource) {
       // Most commonly hit on web: the browser sandbox can't reopen a local
       // file by path after a reload, so the in-memory bytes from a prior
@@ -53,10 +71,40 @@ class LibraryScreen extends ConsumerWidget {
     );
   }
 
+  void _deleteDriveBook(WidgetRef ref, Book book) {
+    ref.read(libraryProvider.notifier).deleteDriveBook(book.id);
+  }
+
+  void _openDriveSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => const Padding(
+        padding: EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [DriveAuthPanel(), DriveUploadButton()],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final books = ref.watch(libraryProvider);
     final selectedCollection = ref.watch(selectedCollectionProvider);
+
+    // Hydrate the grid from Drive exactly once per sign-in transition (not
+    // automatically on launch — only once the user actually connects, per
+    // the Phase 2 plan), by watching for the moment `hasDriveAccess` first
+    // becomes true.
+    ref.listen<AuthState>(authProvider, (previous, next) {
+      final wasReady = previous is AuthStateSignedIn && previous.hasDriveAccess;
+      final isReady = next is AuthStateSignedIn && next.hasDriveAccess;
+      if (isReady && !wasReady) {
+        ref.read(libraryProvider.notifier).hydrateFromDrive();
+      }
+    });
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -69,6 +117,7 @@ class LibraryScreen extends ConsumerWidget {
               : (constraints.maxWidth / 190).floor().clamp(2, 3),
           onOpenBook: (book) => _openBook(context, ref, book),
           onOpenPdf: () => _openPdf(context, ref),
+          onDeleteBook: (book) => _deleteDriveBook(ref, book),
         );
 
         if (isDesktop) {
@@ -91,6 +140,11 @@ class LibraryScreen extends ConsumerWidget {
           appBar: AppBar(
             title: const Text('PageTether'),
             actions: [
+              IconButton(
+                tooltip: 'Google Drive',
+                icon: const Icon(Icons.add_to_drive_rounded),
+                onPressed: () => _openDriveSheet(context),
+              ),
               IconButton(
                 tooltip: 'Open PDF',
                 icon: const Icon(Icons.file_open_rounded),
@@ -131,12 +185,14 @@ class _LibraryContent extends StatelessWidget {
     required this.crossAxisCount,
     required this.onOpenBook,
     required this.onOpenPdf,
+    required this.onDeleteBook,
   });
 
   final List<Book> books;
   final int crossAxisCount;
   final ValueChanged<Book> onOpenBook;
   final VoidCallback onOpenPdf;
+  final ValueChanged<Book> onDeleteBook;
 
   @override
   Widget build(BuildContext context) {
@@ -146,6 +202,7 @@ class _LibraryContent extends StatelessWidget {
 
     return CustomScrollView(
       slivers: [
+        const SliverToBoxAdapter(child: _DriveSyncBanner()),
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(24, 28, 24, 8),
           sliver: SliverToBoxAdapter(
@@ -177,13 +234,89 @@ class _LibraryContent extends StatelessWidget {
             delegate: SliverChildBuilderDelegate(
               (context, index) {
                 final book = books[index];
-                return BookCard(book: book, onOpen: () => onOpenBook(book));
+                return BookCard(
+                  book: book,
+                  onOpen: () => onOpenBook(book),
+                  onDelete: book.isDriveBook ? () => onDeleteBook(book) : null,
+                );
               },
               childCount: books.length,
             ),
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Slim banner showing the current [driveSyncProvider] state: hidden when
+/// idle, a spinner + message while a Drive hydrate/upload/download/delete
+/// is in flight, or a dismissible error strip if the last one failed.
+class _DriveSyncBanner extends ConsumerWidget {
+  const _DriveSyncBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final syncState = ref.watch(driveSyncProvider);
+    return switch (syncState) {
+      DriveSyncIdle() => const SizedBox.shrink(),
+      DriveSyncLoading(:final message) => _Banner(
+        color: AppColors.panel,
+        icon: const SizedBox(
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        message: message,
+      ),
+      DriveSyncError(:final message) => _Banner(
+        color: const Color(0x33EF4444),
+        icon: const Icon(Icons.error_outline_rounded, size: 18, color: Color(0xFFEF4444)),
+        message: message,
+        onDismiss: () => ref.read(driveSyncProvider.notifier).setIdle(),
+      ),
+    };
+  }
+}
+
+class _Banner extends StatelessWidget {
+  const _Banner({
+    required this.color,
+    required this.icon,
+    required this.message,
+    this.onDismiss,
+  });
+
+  final Color color;
+  final Widget icon;
+  final String message;
+  final VoidCallback? onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: [
+          icon,
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(message, style: Theme.of(context).textTheme.bodyMedium),
+          ),
+          if (onDismiss != null)
+            IconButton(
+              icon: const Icon(Icons.close_rounded, size: 16),
+              onPressed: onDismiss,
+              visualDensity: VisualDensity.compact,
+            ),
+        ],
+      ),
     );
   }
 }

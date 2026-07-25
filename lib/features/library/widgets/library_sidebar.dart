@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_theme.dart';
-import '../library_providers.dart';
+import '../library_providers.dart' show LibraryCollection, LibraryCollectionLabel;
+import 'drive_auth_panel.dart';
 
 /// Permanent left sidebar shown on desktop-sized layouts.
 ///
 /// Carries the PageTether brand header, the collection nav (highlight-only
-/// in Phase 1) and the primary "Open PDF" action.
+/// in Phase 1), the primary "Open PDF" action, and — new in Phase 2 — the
+/// Google Drive connect/account panel and an "Upload to Drive" action.
 class LibrarySidebar extends StatelessWidget {
   const LibrarySidebar({
     super.key,
@@ -46,6 +48,18 @@ class LibrarySidebar extends StatelessWidget {
                 ),
               ),
             ),
+            const SizedBox(height: 20),
+            const Divider(height: 1),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
+              child: DriveAuthPanel(),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: DriveUploadButton(),
+            ),
+            const SizedBox(height: 16),
+            const Divider(height: 1),
             const SizedBox(height: 24),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -70,7 +84,7 @@ class LibrarySidebar extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.all(20),
               child: Text(
-                'Phase 1.1 • local PDFs only',
+                'Phase 2 • local PDFs + Google Drive',
                 style: TextStyle(color: AppColors.textSecondary, fontSize: 11),
               ),
             ),

@@ -7,6 +7,12 @@ token.json
 tmp
 .env
 .env.*
+# Phase 2: desktop Drive OAuth token cache. The real runtime cache lives in
+# the OS-managed app-support directory (via path_provider), entirely outside
+# this repo — see core/services/auth/desktop_drive_auth_io.dart — so this
+# entry is defensive-in-depth only, in case that ever changes to a
+# repo-relative path.
+.pagetether/
 # Android signing
 key.properties
 **/*.keystore

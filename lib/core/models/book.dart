@@ -5,15 +5,29 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
+/// Where a [Book]'s canonical copy lives.
+///
+/// [local] books only ever exist on this device (opened via the file
+/// picker). [drive] books are backed by a file in the user's "PageTether
+/// Library" Drive folder (see `core/services/drive/drive_service.dart`) —
+/// they may or may not currently have a live local copy (see
+/// [Book.hasLiveSource]); when they don't, the library offers "Download &
+/// Read" instead of prompting a re-pick.
+enum BookSource { local, drive }
+
 /// A book entry shown on the library dashboard.
 ///
 /// [id] is a stable content id (sha256 of the PDF's bytes, see
-/// `core/storage/pdf_hash.dart`) rather than a file path or random UUID, so
-/// resume/progress keeps working regardless of where the file lives or
-/// which platform reopened it. Metadata is persisted via [toJson]/
-/// [fromJson] (see `core/storage/library_store.dart`); [fileBytes] is
-/// deliberately excluded from persistence — it's only ever a transient,
-/// in-memory source for the current session (see [openedOnWeb]).
+/// `core/storage/pdf_hash.dart`) for [BookSource.local] books, or
+/// `'drive:<fileId>'` for [BookSource.drive] books — Drive file ids are
+/// already globally stable/unique, and hashing would require downloading
+/// the file first just to identify it. (A Drive book uploaded from a local
+/// book therefore currently appears as two distinct library entries; true
+/// content-based de-duplication across sources is deferred — see Phase 2
+/// notes.) Metadata is persisted via [toJson]/[fromJson] (see
+/// `core/storage/library_store.dart`); [fileBytes] is deliberately excluded
+/// from persistence — it's only ever a transient, in-memory source for the
+/// current session (see [openedOnWeb]).
 @immutable
 class Book {
   const Book({
@@ -29,6 +43,9 @@ class Book {
     this.filePath,
     this.fileBytes,
     this.openedOnWeb = false,
+    this.source = BookSource.local,
+    this.driveFileId,
+    this.driveSizeBytes,
   });
 
   /// Stable content id: sha256 of the PDF's raw bytes, hex-encoded.
@@ -70,6 +87,19 @@ class Book {
 
   final DateTime lastOpenedAt;
 
+  /// Where this book's canonical copy lives. See [BookSource].
+  final BookSource source;
+
+  /// Set for [BookSource.drive] books: the Drive file id, used for
+  /// download/delete calls against the Drive API.
+  final String? driveFileId;
+
+  /// Set for [BookSource.drive] books when known: the file size reported by
+  /// Drive, purely for display (e.g. "12.4 MB") before it's downloaded.
+  final int? driveSizeBytes;
+
+  bool get isDriveBook => source == BookSource.drive;
+
   LinearGradient get coverGradient =>
       kCoverGradients[coverGradientIndex % kCoverGradients.length];
 
@@ -102,6 +132,9 @@ class Book {
     Uint8List? fileBytes,
     bool? openedOnWeb,
     DateTime? lastOpenedAt,
+    BookSource? source,
+    String? driveFileId,
+    int? driveSizeBytes,
   }) {
     return Book(
       id: id,
@@ -116,6 +149,9 @@ class Book {
       fileBytes: fileBytes ?? this.fileBytes,
       openedOnWeb: openedOnWeb ?? this.openedOnWeb,
       lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
+      source: source ?? this.source,
+      driveFileId: driveFileId ?? this.driveFileId,
+      driveSizeBytes: driveSizeBytes ?? this.driveSizeBytes,
     );
   }
 
@@ -136,6 +172,9 @@ class Book {
     'filePath': filePath,
     'openedOnWeb': openedOnWeb,
     'lastOpenedAt': lastOpenedAt.toIso8601String(),
+    'source': source.name,
+    'driveFileId': driveFileId,
+    'driveSizeBytes': driveSizeBytes,
   };
 
   factory Book.fromJson(Map<String, dynamic> json) {
@@ -156,6 +195,12 @@ class Book {
       lastOpenedAt:
           DateTime.tryParse(json['lastOpenedAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
+      source: BookSource.values.firstWhere(
+        (s) => s.name == json['source'],
+        orElse: () => BookSource.local,
+      ),
+      driveFileId: json['driveFileId'] as String?,
+      driveSizeBytes: json['driveSizeBytes'] as int?,
     );
   }
 }

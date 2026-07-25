@@ -42,6 +42,21 @@ dependencies:
   window_manager: ^0.5.2
   web: ^1.1.1
 
+  # --- Phase 2: Google Drive storage backbone ---
+  http: ^1.6.0
+  googleapis: ^16.0.0
+  googleapis_auth: ^2.3.3
+  google_sign_in: ^7.2.0
+  # Web-only "Sign in with Google" button (Google Identity Services requires
+  # its own rendered button on web — see core/services/auth/web_signin_button_web.dart).
+  google_sign_in_web: ^1.1.3
+  # Bridges a signed-in google_sign_in account into a googleapis-compatible
+  # AuthClient (used on web + mobile; desktop uses googleapis_auth directly).
+  extension_google_sign_in_as_googleapis_auth: ^3.0.0
+  # Opens the system browser for the desktop OAuth loopback consent flow.
+  url_launcher: ^6.3.2
+  path_provider: ^2.1.6
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

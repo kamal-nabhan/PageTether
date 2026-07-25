@@ -6,21 +6,61 @@ import '../../../core/theme/app_theme.dart';
 /// A premium-styled card for a single book on the library dashboard.
 ///
 /// Shows a gradient cover banner, title/author, a progress bar, and a
-/// call-to-action button that either resumes reading (progress > 0) or
-/// opens the book for the first time.
+/// call-to-action button. For a [BookSource.drive] book that hasn't been
+/// downloaded to this device yet ([Book.hasLiveSource] is false), that
+/// button reads "Download & Read" instead of "Open"/"Continue Reading" —
+/// [onOpen] is the same callback either way; `library_screen.dart` decides
+/// whether opening it means downloading first. [onDelete], when provided
+/// (Drive books only), is triggered by a long-press and shows its own
+/// confirm dialog before calling back.
 class BookCard extends StatelessWidget {
-  const BookCard({super.key, required this.book, required this.onOpen});
+  const BookCard({
+    super.key,
+    required this.book,
+    required this.onOpen,
+    this.onDelete,
+  });
 
   final Book book;
   final VoidCallback onOpen;
+  final VoidCallback? onDelete;
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete from Drive?'),
+        content: Text(
+          '"${book.title}" will be permanently deleted from Google Drive. '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFEF4444),
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) onDelete?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
     final started = book.isStarted;
+    final needsDownload = book.isDriveBook && !book.hasLiveSource;
 
     return Card(
       child: InkWell(
         onTap: onOpen,
+        onLongPress: onDelete == null ? null : () => _confirmDelete(context),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -49,7 +89,11 @@ class BookCard extends StatelessWidget {
                   _ProgressBar(progress: book.progress),
                   const SizedBox(height: 4),
                   Text(
-                    started
+                    needsDownload
+                        ? (book.driveSizeBytes != null
+                              ? '${_formatBytes(book.driveSizeBytes!)} on Google Drive'
+                              : 'On Google Drive')
+                        : started
                         ? '${book.progressPercent}% • page ${book.currentPage} of ${book.pageCount}'
                         : (book.pageCount > 0 ? '${book.pageCount} pages' : 'Ready to open'),
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 11),
@@ -73,10 +117,20 @@ class BookCard extends StatelessWidget {
                         ),
                       ),
                       icon: Icon(
-                        started ? Icons.play_arrow_rounded : Icons.menu_book_rounded,
+                        needsDownload
+                            ? Icons.cloud_download_rounded
+                            : started
+                            ? Icons.play_arrow_rounded
+                            : Icons.menu_book_rounded,
                         size: 18,
                       ),
-                      label: Text(started ? 'Continue Reading' : 'Open'),
+                      label: Text(
+                        needsDownload
+                            ? 'Download & Read'
+                            : started
+                            ? 'Continue Reading'
+                            : 'Open',
+                      ),
                     ),
                   ),
                 ],
@@ -138,6 +192,29 @@ class _CoverBanner extends StatelessWidget {
               size: 20,
             ),
           ),
+          if (book.isDriveBook)
+            Positioned(
+              top: 12,
+              left: 12,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.cloud_rounded, size: 12, color: Colors.white70),
+                    SizedBox(width: 4),
+                    Text(
+                      'Drive',
+                      style: TextStyle(color: Colors.white70, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           Positioned(
             left: 14,
             bottom: 12,
@@ -178,4 +255,18 @@ class _ProgressBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Formats a byte count for display (e.g. "12.4 MB") — used for
+/// not-yet-downloaded Drive books, which only know their remote size.
+String _formatBytes(int bytes) {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  var value = bytes.toDouble();
+  var unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  final formatted = unitIndex == 0 ? value.toStringAsFixed(0) : value.toStringAsFixed(1);
+  return '$formatted ${units[unitIndex]}';
 }
