@@ -38,3 +38,14 @@ Future<PdfSource> getOrDownloadPdf({
   _memoryCache[fileId] = bytes;
   return PdfSource.data(bytes, name: name);
 }
+
+/// No-op on web: an uploaded book already carries its bytes directly on the
+/// [Book] for the current session (see `Book.fileBytes`), and there's no
+/// persistent filesystem to seed beyond that — a page reload loses both the
+/// same way, so there's nothing this would durably add.
+Future<void> seedCache(String fileId, String name, Uint8List bytes) async {}
+
+/// Always null on web: there's no on-disk cache to point a [Book.filePath]
+/// at (see `drive_cache.dart`), so a not-yet-in-memory Drive book always
+/// falls back to "Download & Read" there.
+Future<String?> cachedPathForFileId(String fileId, String name) async => null;

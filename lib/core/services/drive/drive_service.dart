@@ -5,7 +5,11 @@ import 'package:http/http.dart' as http;
 
 import '../../pdf/pdf_source.dart';
 import 'byte_stream_source.dart';
-import 'drive_cache.dart';
+// Imported with a prefix (rather than the unprefixed style used elsewhere in
+// this file) so `DriveService.seedCache`/`cachedPathForFileId` below can
+// share a name with the top-level function they wrap without one recursing
+// into the other.
+import 'drive_cache.dart' as drive_cache;
 import 'upload_source.dart';
 
 const _kLibraryFolderName = 'PageTether Library';
@@ -155,7 +159,7 @@ class DriveService {
     String name, {
     void Function(double progress)? onProgress,
   }) {
-    return getOrDownloadPdf(
+    return drive_cache.getOrDownloadPdf(
       fileId: fileId,
       name: name,
       onProgress: onProgress,
@@ -173,6 +177,23 @@ class DriveService {
       },
     );
   }
+
+  /// Seeds the local disk cache for [fileId] with already-known [bytes] —
+  /// called right after this device uploads a file (see
+  /// `LibraryNotifier.uploadPickedPdfToDrive`) so a later open (on this
+  /// device) via [downloadToCache] is an instant cache hit instead of a
+  /// redundant re-download. [name] should match whatever name callers pass
+  /// to [downloadToCache]/[cachedPathForFileId] for the same book (in
+  /// practice, the book's title) so the cache key lines up. No-op on web.
+  Future<void> seedCache(String fileId, String name, Uint8List bytes) =>
+      drive_cache.seedCache(fileId, name, bytes);
+
+  /// Returns the cached file path for [fileId]/[name] if this device already
+  /// has a local copy — from a previous [downloadToCache] or [seedCache] —
+  /// or null if it doesn't (a genuinely new device, which still needs
+  /// "Download & Read"). Always null on web, which has no on-disk cache.
+  Future<String?> cachedPathForFileId(String fileId, String name) =>
+      drive_cache.cachedPathForFileId(fileId, name);
 
   /// Deletes [fileId] from Drive entirely (not just trashes it).
   Future<void> deleteFile(String fileId) => _api.files.delete(fileId);

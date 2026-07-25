@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // `DetailedApiRequestError` doesn't live under `package:googleapis/common/`
 // in this package version (16.x) — it's defined in `_discoveryapis_commons`
@@ -356,18 +357,34 @@ class LibraryNotifier extends Notifier<List<Book>> {
   }
 
   /// Finds/creates the "PageTether Library" Drive folder and merges its
-  /// PDFs into the library as `source: drive` entries, alongside whatever
-  /// local books are already there. Safe to call repeatedly (e.g. every
-  /// time the user reconnects, hits "Refresh", or the app resumes) —
-  /// existing Drive entries are refreshed in place by id (keeping any
-  /// locally-cached file path and reading progress) rather than duplicated.
+  /// PDFs into the library, alongside whatever local books are already
+  /// there. Safe to call repeatedly (e.g. every time the user reconnects,
+  /// hits "Refresh", the app resumes, or — on desktop, where `resumed`
+  /// doesn't always fire — the window regains focus; see
+  /// `library_screen.dart`).
   ///
-  /// **Authoritative for Drive books**: any local [BookSource.drive] entry
-  /// whose file id is no longer in this listing (deleted from Drive
-  /// directly, or from another device) is removed from the library too —
-  /// this is what gives cross-device deletes eventual consistency. Local
-  /// (non-Drive) books are never touched here regardless of what Drive
-  /// returns.
+  /// **Matches by [Book.driveFileId]**, not [Book.id]: an uploaded book is
+  /// keyed by its content hash (see `uploadPickedPdfToDrive`), not
+  /// `'drive:<fileId>'`, so matching by id alone would fail to find it here
+  /// and add a duplicate entry. A Drive file with no matching local book
+  /// (never downloaded to this device) is added fresh, keyed
+  /// `'drive:<fileId>'` since its content can't be hashed without
+  /// downloading it first.
+  ///
+  /// **Authoritative for Drive books**: any local book whose [Book.driveFileId]
+  /// is no longer in this listing (deleted from Drive directly, or from
+  /// another device) is removed from the library too — this is what gives
+  /// cross-device deletes eventual consistency, regardless of whether that
+  /// book happens to be content-hash-keyed or `'drive:<fileId>'`-keyed.
+  /// Pure-local books ([Book.driveFileId] null) are never touched here
+  /// regardless of what Drive returns.
+  ///
+  /// Also rehydrates a live source for any known Drive book that doesn't
+  /// have one yet: if this device's disk cache already has a copy (from a
+  /// previous download, or from [uploadPickedPdfToDrive] seeding it), its
+  /// [Book.filePath] is set to that cached copy so the library shows "Open"
+  /// instead of a redundant "Download & Read" — only a genuinely new device
+  /// (no local cache) keeps that prompt.
   Future<void> hydrateFromDrive() async {
     final syncNotifier = ref.read(driveSyncProvider.notifier);
     syncNotifier.setLoading('Loading your Drive library…');
@@ -378,27 +395,48 @@ class LibraryNotifier extends Notifier<List<Book>> {
       final drive = DriveService(client);
       final folderId = await drive.ensureLibraryFolder();
       final files = await drive.listPdfs(folderId);
-      final driveIds = {for (final file in files) 'drive:${file.id}'};
+      final driveFileIds = {for (final file in files) file.id};
 
-      final byId = {for (final b in state) b.id: b};
+      final byDriveFileId = {
+        for (final b in state)
+          if (b.driveFileId != null) b.driveFileId!: b,
+      };
+      final updatedBooks = {for (final b in state) b.id: b};
+
       for (final file in files) {
-        final incoming = _driveBookFromMeta(file);
-        final existing = byId[incoming.id];
-        // Only refresh the Drive-side metadata (name/size) — preserve any
-        // locally-cached file path and reading progress we already knew
-        // about from a previous session.
-        byId[incoming.id] = existing == null
-            ? incoming
-            : existing.copyWith(
-                title: incoming.title,
-                driveSizeBytes: incoming.driveSizeBytes,
-              );
+        final existing = byDriveFileId[file.id];
+        if (existing != null) {
+          // Only refresh the Drive-side metadata (name/size) — preserve any
+          // locally-cached file path and reading progress we already knew
+          // about from a previous session.
+          updatedBooks[existing.id] = existing.copyWith(
+            title: _titleFromFileName(file.name),
+            driveSizeBytes: file.sizeBytes,
+          );
+        } else {
+          final incoming = _driveBookFromMeta(file);
+          updatedBooks[incoming.id] = incoming;
+        }
       }
-      byId.removeWhere(
-        (id, book) => book.source == BookSource.drive && !driveIds.contains(id),
+      updatedBooks.removeWhere(
+        (id, book) =>
+            book.driveFileId != null &&
+            !driveFileIds.contains(book.driveFileId),
       );
 
-      state = byId.values.toList()
+      for (final entry in updatedBooks.entries.toList()) {
+        final book = entry.value;
+        if (book.driveFileId == null || book.hasLiveSource) continue;
+        final cachedPath = await drive.cachedPathForFileId(
+          book.driveFileId!,
+          book.title,
+        );
+        if (cachedPath != null) {
+          updatedBooks[entry.key] = book.copyWith(filePath: cachedPath);
+        }
+      }
+
+      state = updatedBooks.values.toList()
         ..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
       unawaited(_store.saveAll(state));
       syncNotifier.setIdle();
@@ -414,6 +452,14 @@ class LibraryNotifier extends Notifier<List<Book>> {
   /// Returns the resulting [Book] (already carrying the just-picked bytes,
   /// so it can render/open immediately without a redundant download), or
   /// null if the user cancelled the picker or the upload failed.
+  ///
+  /// The resulting book is keyed by the picked file's **content hash**, not
+  /// a `'drive:<fileId>'` id (see [Book.id]) — if this content is already in
+  /// the library as a local book, that same entry is upgraded in place
+  /// (gaining [BookSource.drive] + [Book.driveFileId]) rather than adding a
+  /// second card for the same PDF. Either way the local disk cache is also
+  /// seeded with the picked bytes (see [DriveService.seedCache]), so
+  /// reopening this book on this device never re-downloads it from Drive.
   Future<Book?> uploadPickedPdfToDrive() async {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
@@ -426,6 +472,7 @@ class LibraryNotifier extends Notifier<List<Book>> {
     final Uint8List? bytes = file.bytes;
     if (bytes == null) return null;
     final String? path = file.path;
+    final contentId = contentIdForBytes(bytes);
 
     final progressNotifier = ref.read(driveTransferProgressProvider.notifier);
     final syncNotifier = ref.read(driveSyncProvider.notifier);
@@ -437,27 +484,63 @@ class LibraryNotifier extends Notifier<List<Book>> {
           .requireAuthClient();
       final drive = DriveService(client);
       final folderId = await drive.ensureLibraryFolder();
+      // `file_picker` returns a non-null (but unusable) `path` on web, so
+      // the upload-by-path-vs-bytes choice must key off `kIsWeb`, not
+      // nullness of `path` alone — otherwise web hits "Uploading by file
+      // path is not supported on web".
+      final useBytes = kIsWeb || path == null;
       final meta = await drive.uploadPdf(
         folderId: folderId,
         name: file.name,
-        filePath: path,
-        bytes: path == null ? bytes : null,
+        filePath: useBytes ? null : path,
+        bytes: useBytes ? bytes : null,
         onProgress: progressNotifier.set,
       );
 
       final pageCount = await readPdfPageCount(
         PdfSource.data(bytes, name: file.name),
       );
-      final book = _driveBookFromMeta(meta).copyWith(
-        pageCount: pageCount,
-        filePath: path,
-        fileBytes: bytes,
-        lastOpenedAt: DateTime.now(),
-      );
+
+      final existingIndex = state.indexWhere((b) => b.id == contentId);
+      final Book book;
+      if (existingIndex != -1) {
+        // Already in the library as a local (or previously-uploaded) book —
+        // upgrade that entry in place instead of creating a duplicate card.
+        final existing = state[existingIndex];
+        book = existing.copyWith(
+          pageCount: pageCount > 0 ? pageCount : existing.pageCount,
+          filePath: path,
+          fileBytes: bytes,
+          lastOpenedAt: DateTime.now(),
+          source: BookSource.drive,
+          driveFileId: meta.id,
+          driveSizeBytes: meta.sizeBytes,
+        );
+      } else {
+        book = Book(
+          id: contentId,
+          title: _titleFromFileName(file.name),
+          author: 'Google Drive',
+          pageCount: pageCount,
+          currentPage: 1,
+          coverGradientIndex: state.length % kCoverGradients.length,
+          filePath: path,
+          fileBytes: bytes,
+          lastOpenedAt: DateTime.now(),
+          source: BookSource.drive,
+          driveFileId: meta.id,
+          driveSizeBytes: meta.sizeBytes,
+        );
+      }
 
       state = [book, for (final b in state) if (b.id != book.id) b];
       unawaited(_store.upsert(book));
       unawaited(_ensureThumbnail(book));
+      // Seed the fileId-keyed disk cache with what we just uploaded so a
+      // later open on this device (even after a fresh install/library-store
+      // reset that lost `book.filePath`) is a cache hit, not a re-download.
+      // No-op on web (no on-disk cache there — see `drive_cache_stub.dart`).
+      unawaited(drive.seedCache(meta.id, book.title, bytes));
       syncNotifier.setIdle();
       return book;
     } on DriveAuthUnavailableException catch (e) {
@@ -476,6 +559,16 @@ class LibraryNotifier extends Notifier<List<Book>> {
   /// returns the resulting live [Book] with `filePath`/`fileBytes`
   /// populated, ready to open in the reader. Returns null if [bookId] isn't
   /// a known Drive book or the download failed.
+  ///
+  /// Deliberately does **not** re-key a `'drive:<fileId>'` book to its
+  /// content hash after downloading (which would let a later local re-pick
+  /// of the same PDF dedupe against it, mirroring `uploadPickedPdfToDrive`):
+  /// on non-web platforms the downloaded [PdfSource] only carries a
+  /// `filePath`, not `bytes`, so hashing it here would mean reading the
+  /// whole file back off disk into memory purely to compute an id — an
+  /// extra cost for every download with no benefit unless that same file is
+  /// later also opened locally. Left as future work rather than done
+  /// unconditionally.
   Future<Book?> downloadDriveBook(String bookId) async {
     final index = state.indexWhere((b) => b.id == bookId);
     if (index == -1) return null;

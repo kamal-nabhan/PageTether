@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/book.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/auth/auth_state.dart';
+import '../../core/services/window/window_focus_service.dart'
+    as window_focus;
 import '../../core/theme/app_theme.dart';
 import '../reader/reader_screen.dart';
 import 'library_providers.dart';
@@ -32,12 +34,21 @@ class LibraryScreen extends ConsumerStatefulWidget {
 /// — see [didChangeAppLifecycleState] — to auto-refresh the Drive library
 /// when the app comes back to the foreground (covers another device having
 /// added/removed a file while this one was backgrounded).
+///
+/// Desktop windows often don't emit `AppLifecycleState.resumed` just from
+/// regaining OS focus (e.g. alt-tabbing back in without minimizing first),
+/// so [didChangeAppLifecycleState] alone can miss that case there. This is
+/// supplemented with a `window_manager` focus listener (see
+/// [window_focus]/`window_focus_service.dart`) that's a no-op on
+/// mobile/web, where the lifecycle observer already covers it. Both paths
+/// funnel through the same debounced [_maybeAutoRefreshFromDrive], so they
+/// never stack duplicate `files.list` calls.
 class _LibraryScreenState extends ConsumerState<LibraryScreen>
     with WidgetsBindingObserver {
-  /// Minimum gap between auto-refreshes triggered by resuming — otherwise
-  /// quickly alt-tabbing (desktop) or repeatedly foregrounding the app
-  /// (mobile/web tab-switching) would spam Drive with duplicate `files.list`
-  /// calls for no benefit.
+  /// Minimum gap between auto-refreshes triggered by resuming/refocusing —
+  /// otherwise quickly alt-tabbing (desktop) or repeatedly foregrounding the
+  /// app (mobile/web tab-switching) would spam Drive with duplicate
+  /// `files.list` calls for no benefit.
   static const _autoRefreshDebounce = Duration(seconds: 30);
 
   DateTime? _lastAutoRefresh;
@@ -46,11 +57,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    window_focus.registerDesktopWindowFocusListener(
+      _maybeAutoRefreshFromDrive,
+    );
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    window_focus.unregisterDesktopWindowFocusListener();
     super.dispose();
   }
 
@@ -66,6 +81,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
   }
 
   void _maybeAutoRefreshFromDrive() {
+    if (!mounted) return;
     final authState = ref.read(authProvider);
     if (authState is! AuthStateSignedIn || !authState.hasDriveAccess) return;
 

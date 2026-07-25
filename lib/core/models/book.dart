@@ -17,17 +17,12 @@ enum BookSource { local, drive }
 
 /// A book entry shown on the library dashboard.
 ///
-/// [id] is a stable content id (sha256 of the PDF's bytes, see
-/// `core/storage/pdf_hash.dart`) for [BookSource.local] books, or
-/// `'drive:<fileId>'` for [BookSource.drive] books — Drive file ids are
-/// already globally stable/unique, and hashing would require downloading
-/// the file first just to identify it. (A Drive book uploaded from a local
-/// book therefore currently appears as two distinct library entries; true
-/// content-based de-duplication across sources is deferred — see Phase 2
-/// notes.) Metadata is persisted via [toJson]/[fromJson] (see
-/// `core/storage/library_store.dart`); [fileBytes] is deliberately excluded
-/// from persistence — it's only ever a transient, in-memory source for the
-/// current session (see [openedOnWeb]).
+/// See [id] for how a [BookSource.drive] book is keyed — a content hash and
+/// deduplicated with any matching local entry when uploaded from this
+/// device, or `'drive:<fileId>'` when only known remotely. Metadata is
+/// persisted via [toJson]/[fromJson] (see `core/storage/library_store.dart`);
+/// [fileBytes] is deliberately excluded from persistence — it's only ever a
+/// transient, in-memory source for the current session (see [openedOnWeb]).
 @immutable
 class Book {
   const Book({
@@ -48,7 +43,18 @@ class Book {
     this.driveSizeBytes,
   });
 
-  /// Stable content id: sha256 of the PDF's raw bytes, hex-encoded.
+  /// Stable content id: sha256 of the PDF's raw bytes, hex-encoded, whenever
+  /// the content is known locally — which is always true for
+  /// [BookSource.local] books, and also true for a [BookSource.drive] book
+  /// that was uploaded *from* this device (see
+  /// `LibraryNotifier.uploadPickedPdfToDrive`), so uploading a book that's
+  /// already in the library upgrades that same entry in place (adding
+  /// [driveFileId]) instead of creating a duplicate. Only a Drive book this
+  /// device has never had the bytes for (found via
+  /// `LibraryNotifier.hydrateFromDrive`'s listing, not yet downloaded) falls
+  /// back to `'drive:<fileId>'` — Drive file ids are already globally
+  /// stable/unique, and hashing would require downloading the file first
+  /// just to identify it.
   final String id;
   final String title;
   final String author;
@@ -91,7 +97,10 @@ class Book {
   final BookSource source;
 
   /// Set for [BookSource.drive] books: the Drive file id, used for
-  /// download/delete calls against the Drive API.
+  /// download/delete calls against the Drive API, and as the match/reconcile
+  /// key in `LibraryNotifier.hydrateFromDrive` — deliberately not [id],
+  /// which may be a content hash rather than `'drive:<fileId>'` for a book
+  /// uploaded from this device (see [id]).
   final String? driveFileId;
 
   /// Set for [BookSource.drive] books when known: the file size reported by

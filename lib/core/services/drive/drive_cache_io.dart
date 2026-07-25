@@ -9,6 +9,7 @@
 // the same id, a previously-cached copy would go stale until the local
 // cache entry is manually cleared.
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path_provider/path_provider.dart';
 
@@ -61,4 +62,30 @@ Future<PdfSource> getOrDownloadPdf({
   }
   await tempTarget.rename(target.path);
   return PdfSource.file(target.path, name: name);
+}
+
+/// Writes [bytes] into the same fileId-keyed cache location [getOrDownloadPdf]
+/// reads from, so a book this device just uploaded is an instant cache hit
+/// the next time it's opened (e.g. after `hydrateFromDrive` re-lists it) —
+/// no redundant download back down from Drive. No-ops if a copy is already
+/// cached under this key.
+Future<void> seedCache(String fileId, String name, Uint8List bytes) async {
+  final dir = await _cacheDir();
+  final target = File(
+    '${dir.path}${Platform.pathSeparator}${_safeFileName(fileId, name)}',
+  );
+  if (await target.exists()) return;
+  await target.writeAsBytes(bytes, flush: true);
+}
+
+/// Returns the cached file path for [fileId]/[name] if this device already
+/// has a local copy (from a previous download or [seedCache]), or null if it
+/// doesn't — the "genuinely new device" case that still needs a real
+/// "Download & Read" prompt rather than silently reusing nothing.
+Future<String?> cachedPathForFileId(String fileId, String name) async {
+  final dir = await _cacheDir();
+  final target = File(
+    '${dir.path}${Platform.pathSeparator}${_safeFileName(fileId, name)}',
+  );
+  return await target.exists() ? target.path : null;
 }
