@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:googleapis/drive/v3.dart' show DetailedApiRequestError;
 
 import '../../core/models/book.dart';
+import '../../core/models/collection.dart';
 import '../../core/pdf/pdf_document_tools.dart';
 import '../../core/pdf/pdf_source.dart';
 import '../../core/services/auth/auth_exceptions.dart';
@@ -23,19 +24,77 @@ import '../../core/storage/library_store.dart';
 import '../../core/storage/pdf_hash.dart';
 import '../../core/theme/app_theme.dart';
 
-/// The collections shown in the sidebar (desktop) / bottom nav (mobile).
+/// Which set of books the grid is currently filtered to: either one of the
+/// three built-in views, or a specific user [Collection]'s id.
 ///
-/// Phase 1.1 still treats these as visual/highlight-only filters — there is
-/// no favorites/recent tracking yet, so selecting one just changes which
-/// nav item is highlighted.
-enum LibraryCollection { allBooks, favorites, recent }
+/// A sealed class (rather than the Phase 1.1 `LibraryCollection` enum it
+/// replaces) so [Custom] can carry a collection id — there are arbitrarily
+/// many user collections, not a fixed handful. Each variant overrides
+/// `==`/`hashCode` for structural equality, so two [Custom] instances for
+/// the same collection id compare equal and UI code can safely compare
+/// `selected == someValue`.
+sealed class LibrarySelection {
+  const LibrarySelection();
+}
 
-extension LibraryCollectionLabel on LibraryCollection {
-  String get label => switch (this) {
-    LibraryCollection.allBooks => 'All Books',
-    LibraryCollection.favorites => 'Favorites',
-    LibraryCollection.recent => 'Recent',
-  };
+final class AllBooks extends LibrarySelection {
+  const AllBooks();
+  @override
+  bool operator ==(Object other) => other is AllBooks;
+  @override
+  int get hashCode => (AllBooks).hashCode;
+}
+
+final class Favorites extends LibrarySelection {
+  const Favorites();
+  @override
+  bool operator ==(Object other) => other is Favorites;
+  @override
+  int get hashCode => (Favorites).hashCode;
+}
+
+final class Recent extends LibrarySelection {
+  const Recent();
+  @override
+  bool operator ==(Object other) => other is Recent;
+  @override
+  int get hashCode => (Recent).hashCode;
+}
+
+final class Custom extends LibrarySelection {
+  const Custom(this.collectionId);
+  final String collectionId;
+  @override
+  bool operator ==(Object other) =>
+      other is Custom && other.collectionId == collectionId;
+  @override
+  int get hashCode => Object.hash(Custom, collectionId);
+}
+
+/// Filters [books] down to whatever [selection] represents. [Recent] caps at
+/// [recentLimit] and only counts a book as "opened" once its
+/// [Book.lastOpenedAt] has actually been bumped past the Phase 1.1
+/// (`library_bootstrap.dart`) `DateTime.fromMillisecondsSinceEpoch(0)`
+/// sentinel used for the bundled sample book's never-really-opened default.
+List<Book> filterBooksForSelection(
+  List<Book> books,
+  LibrarySelection selection, {
+  int recentLimit = 20,
+}) {
+  switch (selection) {
+    case AllBooks():
+      return books;
+    case Favorites():
+      return [for (final b in books) if (b.isFavorite) b];
+    case Recent():
+      final opened = [
+        for (final b in books)
+          if (b.lastOpenedAt.millisecondsSinceEpoch > 0) b,
+      ]..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
+      return opened.take(recentLimit).toList();
+    case Custom(:final collectionId):
+      return [for (final b in books) if (b.collectionIds.contains(collectionId)) b];
+  }
 }
 
 /// Currently highlighted collection in the sidebar/bottom nav.
@@ -43,15 +102,15 @@ extension LibraryCollectionLabel on LibraryCollection {
 /// Riverpod 3 moved `StateProvider` to a legacy import and made `state =`
 /// protected on plain [Notifier]s, so external widgets can no longer set it
 /// directly — call [select] instead.
-class SelectedCollectionNotifier extends Notifier<LibraryCollection> {
+class SelectedCollectionNotifier extends Notifier<LibrarySelection> {
   @override
-  LibraryCollection build() => LibraryCollection.allBooks;
+  LibrarySelection build() => const AllBooks();
 
-  void select(LibraryCollection collection) => state = collection;
+  void select(LibrarySelection selection) => state = selection;
 }
 
 final selectedCollectionProvider =
-    NotifierProvider<SelectedCollectionNotifier, LibraryCollection>(
+    NotifierProvider<SelectedCollectionNotifier, LibrarySelection>(
       SelectedCollectionNotifier.new,
     );
 
@@ -671,6 +730,73 @@ class LibraryNotifier extends Notifier<List<Book>> {
     unawaited(_store.remove(bookId));
   }
 
+  /// Flips [bookId]'s [Book.isFavorite] flag and persists it. No-op if
+  /// [bookId] isn't in the library.
+  void toggleFavorite(String bookId) {
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+    final updated = state[index].copyWith(isFavorite: !state[index].isFavorite);
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
+  /// Adds [bookId] to [collectionId]'s membership set and persists it.
+  /// No-op if [bookId] isn't in the library or is already a member.
+  void addToCollection(String bookId, String collectionId) {
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+    final existing = state[index];
+    if (existing.collectionIds.contains(collectionId)) return;
+    final updated = existing.copyWith(
+      collectionIds: {...existing.collectionIds, collectionId},
+    );
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
+  /// Removes [bookId] from [collectionId]'s membership set and persists it.
+  /// No-op if [bookId] isn't in the library or wasn't a member.
+  void removeFromCollection(String bookId, String collectionId) {
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+    final existing = state[index];
+    if (!existing.collectionIds.contains(collectionId)) return;
+    final updated = existing.copyWith(
+      collectionIds: {...existing.collectionIds}..remove(collectionId),
+    );
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
+  /// Scrubs [collectionId] from every book that references it. Called when
+  /// the collection itself is deleted (see `CollectionsNotifier.delete`) so
+  /// no book is left pointing at a now-nonexistent collection id.
+  void removeCollectionFromAllBooks(String collectionId) {
+    final toUpdate = [
+      for (final b in state)
+        if (b.collectionIds.contains(collectionId))
+          b.copyWith(collectionIds: {...b.collectionIds}..remove(collectionId)),
+    ];
+    if (toUpdate.isEmpty) return;
+    final byId = {for (final b in toUpdate) b.id: b};
+    state = [for (final b in state) byId[b.id] ?? b];
+    for (final b in toUpdate) {
+      unawaited(_store.upsert(b));
+    }
+  }
+
+  /// Renames [bookId]'s [Book.title] and/or [Book.author] and persists it.
+  /// Either argument left null keeps that field unchanged; both null is a
+  /// no-op. Also a no-op if [bookId] isn't in the library.
+  void renameBook(String bookId, {String? title, String? author}) {
+    if (title == null && author == null) return;
+    final index = state.indexWhere((b) => b.id == bookId);
+    if (index == -1) return;
+    final updated = state[index].copyWith(title: title, author: author);
+    state = [for (final b in state) if (b.id == bookId) updated else b];
+    unawaited(_store.upsert(updated));
+  }
+
   DriveTransferProgressNotifier get progressNotifier =>
       ref.read(driveTransferProgressProvider.notifier);
 
@@ -702,3 +828,60 @@ class LibraryNotifier extends Notifier<List<Book>> {
 final libraryProvider = NotifierProvider<LibraryNotifier, List<Book>>(
   LibraryNotifier.new,
 );
+
+/// Holds the user's custom [Collection]s (distinct from the built-in
+/// All Books/Favorites/Recent views — see [LibrarySelection]). Loaded once
+/// in `main()` before `runApp`, mirroring how [LibraryNotifier] is seeded
+/// with [loadInitialLibrary]'s result.
+class CollectionsNotifier extends Notifier<List<Collection>> {
+  CollectionsNotifier([this._initialCollections = const []]);
+
+  final List<Collection> _initialCollections;
+
+  @override
+  List<Collection> build() => _initialCollections;
+
+  LibraryStore get _store => ref.read(libraryStoreProvider);
+
+  /// Creates and persists a new collection named [name] (trimmed). Returns
+  /// null (no-op) if [name] is blank after trimming.
+  Collection? create(String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return null;
+    final collection = Collection(
+      id: generateCollectionId(),
+      name: trimmed,
+      colorIndex: state.length % kCoverGradients.length,
+    );
+    state = [...state, collection];
+    unawaited(_store.saveCollections(state));
+    return collection;
+  }
+
+  /// Renames collection [id] to [name] (trimmed). No-op if [name] is blank
+  /// after trimming or [id] isn't a known collection.
+  void rename(String id, String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return;
+    final index = state.indexWhere((c) => c.id == id);
+    if (index == -1) return;
+    final updated = state[index].copyWith(name: trimmed);
+    state = [for (final c in state) if (c.id == id) updated else c];
+    unawaited(_store.saveCollections(state));
+  }
+
+  /// Deletes collection [id] and scrubs it from every book's membership
+  /// (see [LibraryNotifier.removeCollectionFromAllBooks]), so no book keeps
+  /// pointing at a now-nonexistent collection. No-op if [id] isn't known.
+  void delete(String id) {
+    if (!state.any((c) => c.id == id)) return;
+    state = [for (final c in state) if (c.id != id) c];
+    unawaited(_store.saveCollections(state));
+    ref.read(libraryProvider.notifier).removeCollectionFromAllBooks(id);
+  }
+}
+
+final collectionsProvider =
+    NotifierProvider<CollectionsNotifier, List<Collection>>(
+      CollectionsNotifier.new,
+    );

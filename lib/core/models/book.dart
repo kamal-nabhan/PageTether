@@ -41,6 +41,8 @@ class Book {
     this.source = BookSource.local,
     this.driveFileId,
     this.driveSizeBytes,
+    this.isFavorite = false,
+    this.collectionIds = const {},
   });
 
   /// Stable content id: sha256 of the PDF's raw bytes, hex-encoded, whenever
@@ -107,6 +109,18 @@ class Book {
   /// Drive, purely for display (e.g. "12.4 MB") before it's downloaded.
   final int? driveSizeBytes;
 
+  /// Toggled via the heart icon on [BookCard]/its overflow menu. Backs the
+  /// built-in "Favorites" view (see `LibrarySelection` in
+  /// `library_providers.dart`).
+  final bool isFavorite;
+
+  /// Ids of the user-defined [Collection]s (see `core/models/collection.dart`)
+  /// this book belongs to. Membership lives here rather than on [Collection]
+  /// itself so removing a book only ever means editing one record; deleting
+  /// a collection is the one case that must instead sweep every book (see
+  /// `LibraryNotifier.removeCollectionFromAllBooks`).
+  final Set<String> collectionIds;
+
   bool get isDriveBook => source == BookSource.drive;
 
   LinearGradient get coverGradient =>
@@ -144,6 +158,8 @@ class Book {
     BookSource? source,
     String? driveFileId,
     int? driveSizeBytes,
+    bool? isFavorite,
+    Set<String>? collectionIds,
   }) {
     return Book(
       id: id,
@@ -161,6 +177,8 @@ class Book {
       source: source ?? this.source,
       driveFileId: driveFileId ?? this.driveFileId,
       driveSizeBytes: driveSizeBytes ?? this.driveSizeBytes,
+      isFavorite: isFavorite ?? this.isFavorite,
+      collectionIds: collectionIds ?? this.collectionIds,
     );
   }
 
@@ -188,6 +206,8 @@ class Book {
       source: source,
       driveFileId: driveFileId,
       driveSizeBytes: driveSizeBytes,
+      isFavorite: isFavorite,
+      collectionIds: collectionIds,
     );
   }
 
@@ -211,6 +231,8 @@ class Book {
     'source': source.name,
     'driveFileId': driveFileId,
     'driveSizeBytes': driveSizeBytes,
+    'isFavorite': isFavorite,
+    'collectionIds': collectionIds.toList(),
   };
 
   factory Book.fromJson(Map<String, dynamic> json) {
@@ -237,6 +259,12 @@ class Book {
       ),
       driveFileId: json['driveFileId'] as String?,
       driveSizeBytes: json['driveSizeBytes'] as int?,
+      isFavorite: json['isFavorite'] as bool? ?? false,
+      collectionIds:
+          (json['collectionIds'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toSet() ??
+          const {},
     );
   }
 }

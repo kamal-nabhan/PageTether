@@ -18,7 +18,12 @@ import '../../../core/theme/app_theme.dart';
 /// is only reachable via the overflow menu's "Remove from library" item,
 /// which shows its own (non-destructive-framed) confirm dialog first.
 /// [onChangeCover]/[onResetCover] back the overflow menu's cover-editing
-/// actions — see `_BookCardMenu`.
+/// actions — see `_BookCardMenu`. [onToggleFavorite] backs both the heart
+/// icon next to the title and the menu's "Add/Remove Favorite" item;
+/// [onAddToCollection]/[onRename] each open their own dialog (see
+/// `add_to_collection_dialog.dart`/`rename_book_dialog.dart`) and are wired
+/// up by the caller (`library_screen.dart`) rather than owned here, keeping
+/// this widget itself provider-agnostic like the rest of its callbacks.
 class BookCard extends StatelessWidget {
   const BookCard({
     super.key,
@@ -28,6 +33,9 @@ class BookCard extends StatelessWidget {
     this.onRemove,
     this.onChangeCover,
     this.onResetCover,
+    this.onToggleFavorite,
+    this.onAddToCollection,
+    this.onRename,
   });
 
   final Book book;
@@ -36,6 +44,9 @@ class BookCard extends StatelessWidget {
   final VoidCallback? onRemove;
   final VoidCallback? onChangeCover;
   final VoidCallback? onResetCover;
+  final VoidCallback? onToggleFavorite;
+  final VoidCallback? onAddToCollection;
+  final VoidCallback? onRename;
 
   Future<void> _confirmDelete(BuildContext context) async {
     if (await _confirmDeleteDialog(context, book.title)) onDelete?.call();
@@ -75,12 +86,34 @@ class BookCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                      if (onToggleFavorite != null)
+                        IconButton(
+                          tooltip: book.isFavorite
+                              ? 'Remove from Favorites'
+                              : 'Add to Favorites',
+                          icon: Icon(
+                            book.isFavorite
+                                ? Icons.favorite_rounded
+                                : Icons.favorite_border_rounded,
+                            size: 18,
+                            color: book.isFavorite
+                                ? const Color(0xFFEF4444)
+                                : AppColors.textSecondary,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: onToggleFavorite,
+                        ),
                       _BookCardMenu(
                         book: book,
                         onDelete: onDelete,
                         onRemove: onRemove,
                         onChangeCover: onChangeCover,
                         onResetCover: onResetCover,
+                        onToggleFavorite: onToggleFavorite,
+                        onAddToCollection: onAddToCollection,
+                        onRename: onRename,
                       ),
                     ],
                   ),
@@ -249,6 +282,9 @@ class _BookCardMenu extends StatelessWidget {
     required this.onRemove,
     required this.onChangeCover,
     required this.onResetCover,
+    required this.onToggleFavorite,
+    required this.onAddToCollection,
+    required this.onRename,
   });
 
   final Book book;
@@ -256,13 +292,19 @@ class _BookCardMenu extends StatelessWidget {
   final VoidCallback? onRemove;
   final VoidCallback? onChangeCover;
   final VoidCallback? onResetCover;
+  final VoidCallback? onToggleFavorite;
+  final VoidCallback? onAddToCollection;
+  final VoidCallback? onRename;
 
   @override
   Widget build(BuildContext context) {
     if (onChangeCover == null &&
         onResetCover == null &&
         onDelete == null &&
-        onRemove == null) {
+        onRemove == null &&
+        onToggleFavorite == null &&
+        onAddToCollection == null &&
+        onRename == null) {
       return const SizedBox.shrink();
     }
 
@@ -272,6 +314,12 @@ class _BookCardMenu extends StatelessWidget {
       padding: EdgeInsets.zero,
       onSelected: (action) async {
         switch (action) {
+          case _BookCardAction.toggleFavorite:
+            onToggleFavorite?.call();
+          case _BookCardAction.rename:
+            onRename?.call();
+          case _BookCardAction.addToCollection:
+            onAddToCollection?.call();
           case _BookCardAction.changeCover:
             onChangeCover?.call();
           case _BookCardAction.resetCover:
@@ -287,6 +335,23 @@ class _BookCardMenu extends StatelessWidget {
         }
       },
       itemBuilder: (context) => [
+        if (onToggleFavorite != null)
+          PopupMenuItem(
+            value: _BookCardAction.toggleFavorite,
+            child: Text(
+              book.isFavorite ? 'Remove from Favorites' : 'Add to Favorites',
+            ),
+          ),
+        if (onRename != null)
+          const PopupMenuItem(
+            value: _BookCardAction.rename,
+            child: Text('Rename…'),
+          ),
+        if (onAddToCollection != null)
+          const PopupMenuItem(
+            value: _BookCardAction.addToCollection,
+            child: Text('Add to collection…'),
+          ),
         PopupMenuItem(
           value: _BookCardAction.changeCover,
           enabled: onChangeCover != null,
@@ -312,7 +377,15 @@ class _BookCardMenu extends StatelessWidget {
   }
 }
 
-enum _BookCardAction { changeCover, resetCover, delete, remove }
+enum _BookCardAction {
+  toggleFavorite,
+  rename,
+  addToCollection,
+  changeCover,
+  resetCover,
+  delete,
+  remove,
+}
 
 /// Shared "Delete from Drive?" confirmation, used both by [BookCard]'s
 /// long-press (kept for backwards compatibility) and by [_BookCardMenu]'s

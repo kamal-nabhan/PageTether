@@ -19,12 +19,16 @@ Future<void> main() async {
   final prefs = await SharedPreferences.getInstance();
   final store = LibraryStore(prefs);
   final initialBooks = await loadInitialLibrary(store);
+  final initialCollections = await store.loadCollections();
 
   runApp(
     ProviderScope(
       overrides: [
         libraryStoreProvider.overrideWithValue(store),
         libraryProvider.overrideWith(() => LibraryNotifier(initialBooks)),
+        collectionsProvider.overrideWith(
+          () => CollectionsNotifier(initialCollections),
+        ),
       ],
       child: const PageTetherApp(),
     ),

@@ -9,9 +9,12 @@ import '../../core/services/window/window_focus_service.dart'
 import '../../core/theme/app_theme.dart';
 import '../reader/reader_screen.dart';
 import 'library_providers.dart';
+import 'widgets/add_to_collection_dialog.dart';
 import 'widgets/book_card.dart';
+import 'widgets/collections_sheet.dart';
 import 'widgets/drive_auth_panel.dart';
 import 'widgets/library_sidebar.dart';
+import 'widgets/rename_book_dialog.dart';
 
 /// Breakpoint above which the permanent sidebar replaces the bottom nav.
 const double kDesktopBreakpoint = 800;
@@ -156,6 +159,18 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     ref.read(libraryProvider.notifier).resetCover(book.id);
   }
 
+  void _toggleFavorite(WidgetRef ref, Book book) {
+    ref.read(libraryProvider.notifier).toggleFavorite(book.id);
+  }
+
+  void _addToCollection(BuildContext context, Book book) {
+    showAddToCollectionDialog(context, book);
+  }
+
+  void _renameBook(BuildContext context, WidgetRef ref, Book book) {
+    showRenameBookDialog(context, ref, book);
+  }
+
   void _openDriveSheet(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
@@ -170,10 +185,65 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     );
   }
 
+  void _openCollectionsSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => const CollectionsSheet(),
+    );
+  }
+
+  /// Which bottom-nav index corresponds to [selection] — the built-ins map
+  /// 1:1, and any [Custom] collection maps to the 4th "Collections"
+  /// destination (which doesn't filter the grid itself; tapping it just
+  /// opens [CollectionsSheet] — see [_openCollectionsSheet]).
+  int _bottomNavIndexFor(LibrarySelection selection) => switch (selection) {
+    AllBooks() => 0,
+    Favorites() => 1,
+    Recent() => 2,
+    Custom() => 3,
+  };
+
+  void _onBottomNavSelected(BuildContext context, WidgetRef ref, int index) {
+    switch (index) {
+      case 0:
+        ref.read(selectedCollectionProvider.notifier).select(const AllBooks());
+      case 1:
+        ref.read(selectedCollectionProvider.notifier).select(const Favorites());
+      case 2:
+        ref.read(selectedCollectionProvider.notifier).select(const Recent());
+      default:
+        _openCollectionsSheet(context);
+    }
+  }
+
+  /// The grid header text for [selection] — a fixed label for each built-in
+  /// view, or the matching [Collection.name] for a custom one (falling back
+  /// to a generic label if it's since been deleted, e.g. a stale selection
+  /// racing a delete from another part of the UI).
+  String _headingLabelFor(WidgetRef ref, LibrarySelection selection) {
+    switch (selection) {
+      case AllBooks():
+        return 'Your Library';
+      case Favorites():
+        return 'Favorites';
+      case Recent():
+        return 'Recent';
+      case Custom(:final collectionId):
+        for (final collection in ref.watch(collectionsProvider)) {
+          if (collection.id == collectionId) return collection.name;
+        }
+        return 'Collection';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final books = ref.watch(libraryProvider);
-    final selectedCollection = ref.watch(selectedCollectionProvider);
+    final selection = ref.watch(selectedCollectionProvider);
+    final filteredBooks = filterBooksForSelection(books, selection);
+    final headingLabel = _headingLabelFor(ref, selection);
 
     // Hydrate the grid from Drive exactly once per sign-in transition (not
     // automatically on launch — only once the user actually connects, per
@@ -192,7 +262,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
         final isDesktop = constraints.maxWidth >= kDesktopBreakpoint;
 
         final content = _LibraryContent(
-          books: books,
+          books: filteredBooks,
+          isLibraryEmpty: books.isEmpty,
+          selection: selection,
+          headingLabel: headingLabel,
           crossAxisCount: isDesktop
               ? (constraints.maxWidth / 240).floor().clamp(3, 6)
               : (constraints.maxWidth / 190).floor().clamp(2, 3),
@@ -202,6 +275,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
           onRemoveBook: (book) => _removeFromLibrary(ref, book),
           onChangeCover: (book) => _changeCover(ref, book),
           onResetCover: (book) => _resetCover(ref, book),
+          onToggleFavorite: (book) => _toggleFavorite(ref, book),
+          onAddToCollection: (book) => _addToCollection(context, book),
+          onRenameBook: (book) => _renameBook(context, ref, book),
+          onShowAllBooks: () => ref
+              .read(selectedCollectionProvider.notifier)
+              .select(const AllBooks()),
         );
 
         if (isDesktop) {
@@ -209,9 +288,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
             body: Row(
               children: [
                 LibrarySidebar(
-                  selected: selectedCollection,
-                  onSelect: (c) =>
-                      ref.read(selectedCollectionProvider.notifier).select(c),
+                  selected: selection,
+                  onSelect: (s) =>
+                      ref.read(selectedCollectionProvider.notifier).select(s),
                   onOpenPdf: () => _openPdf(context, ref),
                 ),
                 Expanded(child: content),
@@ -238,10 +317,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
           ),
           body: content,
           bottomNavigationBar: NavigationBar(
-            selectedIndex: selectedCollection.index,
-            onDestinationSelected: (index) => ref
-                .read(selectedCollectionProvider.notifier)
-                .select(LibraryCollection.values[index]),
+            selectedIndex: _bottomNavIndexFor(selection),
+            onDestinationSelected: (index) =>
+                _onBottomNavSelected(context, ref, index),
             destinations: const [
               NavigationDestination(
                 icon: Icon(Icons.grid_view_rounded),
@@ -255,6 +333,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
                 icon: Icon(Icons.history_rounded),
                 label: 'Recent',
               ),
+              NavigationDestination(
+                icon: Icon(Icons.folder_rounded),
+                label: 'Collections',
+              ),
             ],
           ),
         );
@@ -266,6 +348,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
 class _LibraryContent extends StatelessWidget {
   const _LibraryContent({
     required this.books,
+    required this.isLibraryEmpty,
+    required this.selection,
+    required this.headingLabel,
     required this.crossAxisCount,
     required this.onOpenBook,
     required this.onOpenPdf,
@@ -273,9 +358,21 @@ class _LibraryContent extends StatelessWidget {
     required this.onRemoveBook,
     required this.onChangeCover,
     required this.onResetCover,
+    required this.onToggleFavorite,
+    required this.onAddToCollection,
+    required this.onRenameBook,
+    required this.onShowAllBooks,
   });
 
+  /// Already filtered down to [selection] (see `filterBooksForSelection`).
   final List<Book> books;
+
+  /// Whether the *unfiltered* library has zero books — distinguishes a
+  /// genuinely empty library ([_EmptyLibraryView]) from a non-empty library
+  /// whose current view just has no matches ([_EmptyFilterView]).
+  final bool isLibraryEmpty;
+  final LibrarySelection selection;
+  final String headingLabel;
   final int crossAxisCount;
   final ValueChanged<Book> onOpenBook;
   final VoidCallback onOpenPdf;
@@ -283,11 +380,21 @@ class _LibraryContent extends StatelessWidget {
   final ValueChanged<Book> onRemoveBook;
   final ValueChanged<Book> onChangeCover;
   final ValueChanged<Book> onResetCover;
+  final ValueChanged<Book> onToggleFavorite;
+  final ValueChanged<Book> onAddToCollection;
+  final ValueChanged<Book> onRenameBook;
+  final VoidCallback onShowAllBooks;
 
   @override
   Widget build(BuildContext context) {
-    if (books.isEmpty) {
+    if (isLibraryEmpty) {
       return _EmptyLibraryView(onOpenPdf: onOpenPdf);
+    }
+    if (books.isEmpty) {
+      return _EmptyFilterView(
+        selection: selection,
+        onShowAllBooks: onShowAllBooks,
+      );
     }
 
     return CustomScrollView(
@@ -300,7 +407,7 @@ class _LibraryContent extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Your Library',
+                  headingLabel,
                   style: Theme.of(context).textTheme.headlineMedium,
                 ),
                 const SizedBox(height: 4),
@@ -335,6 +442,9 @@ class _LibraryContent extends StatelessWidget {
                   onResetCover: book.hasLiveSource
                       ? () => onResetCover(book)
                       : null,
+                  onToggleFavorite: () => onToggleFavorite(book),
+                  onAddToCollection: () => onAddToCollection(book),
+                  onRename: () => onRenameBook(book),
                 );
               },
               childCount: books.length,
@@ -413,6 +523,74 @@ class _Banner extends StatelessWidget {
               visualDensity: VisualDensity.compact,
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Shown when the *unfiltered* library has books, but the currently
+/// selected view (Favorites/Recent/a custom collection) has no matches —
+/// distinct from [_EmptyLibraryView], which only appears when the library
+/// has no books at all regardless of the current view.
+class _EmptyFilterView extends StatelessWidget {
+  const _EmptyFilterView({required this.selection, required this.onShowAllBooks});
+
+  final LibrarySelection selection;
+  final VoidCallback onShowAllBooks;
+
+  (IconData, String, String) get _copy => switch (selection) {
+    // Unreachable in practice: an empty [AllBooks] filter is exactly
+    // [isLibraryEmpty], which `_LibraryContent` already routes to
+    // [_EmptyLibraryView] instead — kept here only so the switch stays
+    // exhaustive over every `LibrarySelection` variant.
+    AllBooks() => (
+      Icons.auto_stories_outlined,
+      'Your library is empty',
+      'Open a PDF from your device to get started.',
+    ),
+    Favorites() => (
+      Icons.favorite_border_rounded,
+      'No favorites yet',
+      'Tap the heart on a book, or use its ⋮ menu, to add it here.',
+    ),
+    Recent() => (
+      Icons.history_rounded,
+      'Nothing recent',
+      'Books you open will show up here, most recent first.',
+    ),
+    Custom() => (
+      Icons.folder_open_rounded,
+      'This collection is empty',
+      'Add books to it from any book card\'s ⋮ menu.',
+    ),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, title, subtitle) = _copy;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 56, color: AppColors.textSecondary),
+            const SizedBox(height: 16),
+            Text(title, style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 8),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 20),
+            OutlinedButton.icon(
+              onPressed: onShowAllBooks,
+              icon: const Icon(Icons.grid_view_rounded),
+              label: const Text('View All Books'),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -3,18 +3,25 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
+import '../models/collection.dart';
 
-/// Local persistence for the library's book metadata.
+/// Local persistence for the library's book metadata and user-defined
+/// collections.
 ///
 /// Backed by [SharedPreferences] as the interim local store for Phase 1.1
 /// (a proper database arrives in a later sync phase — this is intentionally
 /// simple). Everything lives under one JSON object mapping each book's
 /// content id (see `pdf_hash.dart`) to its serialized record, so a single
-/// key holds the whole library.
+/// key holds the whole library. Collections (see `core/models/collection.dart`)
+/// are a separate, much smaller list under their own key — there's no need
+/// for the per-record upsert/remove [loadAll]/[upsert]/[remove] give books,
+/// since the whole collection list is always small enough to load/save in
+/// one shot (see [loadCollections]/[saveCollections]).
 class LibraryStore {
   LibraryStore(this._prefs);
 
   static const _key = 'pt.library.v1';
+  static const _collectionsKey = 'pt.collections.v1';
 
   final SharedPreferences _prefs;
 
@@ -46,6 +53,31 @@ class LibraryStore {
   /// Replaces the entire persisted library with [books].
   Future<void> saveAll(List<Book> books) async {
     await _writeMap({for (final book in books) book.id: book.toJson()});
+  }
+
+  /// Loads every persisted [Collection], in whatever order they were saved
+  /// (creation order — see `CollectionsNotifier.create`).
+  Future<List<Collection>> loadCollections() async {
+    final raw = _prefs.getString(_collectionsKey);
+    if (raw == null || raw.isEmpty) return <Collection>[];
+    try {
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      return decoded
+          .map((entry) => Collection.fromJson(entry as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      // Mirrors _readMap's corrupt-data fallback: never crash startup over
+      // bad local data — start with no collections instead.
+      return <Collection>[];
+    }
+  }
+
+  /// Replaces the entire persisted collection list with [collections].
+  Future<void> saveCollections(List<Collection> collections) async {
+    await _prefs.setString(
+      _collectionsKey,
+      jsonEncode([for (final c in collections) c.toJson()]),
+    );
   }
 
   Map<String, dynamic> _readMap() {
