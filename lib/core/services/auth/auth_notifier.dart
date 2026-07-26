@@ -114,7 +114,21 @@ class AuthNotifier extends Notifier<AuthState> {
 
     _eventsSub ??= GoogleIdentityAuth.instance.authenticationEvents.listen(
       _handleAuthEvent,
-      onError: (Object e) => state = AuthStateError('$e'),
+      onError: (Object e) {
+        // A failed *silent* restore (attemptLightweightAuthentication) or a
+        // dismissed prompt surfaces here as `canceled` — this includes
+        // FedCM's "NetworkError: Error retrieving a token" when the browser
+        // simply has no session to restore. That is benign: fall back to
+        // signed-out so the "Sign in with Google" button renders, instead of
+        // a blocking error banner that hides it. (Matches the package's own
+        // example, which treats `canceled` as no-error.)
+        if (e is GoogleSignInException &&
+            e.code == GoogleSignInExceptionCode.canceled) {
+          state = const AuthStateSignedOut();
+          return;
+        }
+        state = AuthStateError('$e');
+      },
     );
 
     state = const AuthStateSignedOut();

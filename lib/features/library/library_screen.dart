@@ -144,6 +144,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     ref.read(libraryProvider.notifier).deleteDriveBook(book.id);
   }
 
+  void _removeFromLibrary(WidgetRef ref, Book book) {
+    ref.read(libraryProvider.notifier).removeFromLibrary(book.id);
+  }
+
   void _changeCover(WidgetRef ref, Book book) {
     ref.read(libraryProvider.notifier).pickAndSetCover(book.id);
   }
@@ -195,6 +199,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
           onOpenBook: (book) => _openBook(context, ref, book),
           onOpenPdf: () => _openPdf(context, ref),
           onDeleteBook: (book) => _deleteDriveBook(ref, book),
+          onRemoveBook: (book) => _removeFromLibrary(ref, book),
           onChangeCover: (book) => _changeCover(ref, book),
           onResetCover: (book) => _resetCover(ref, book),
         );
@@ -265,6 +270,7 @@ class _LibraryContent extends StatelessWidget {
     required this.onOpenBook,
     required this.onOpenPdf,
     required this.onDeleteBook,
+    required this.onRemoveBook,
     required this.onChangeCover,
     required this.onResetCover,
   });
@@ -274,6 +280,7 @@ class _LibraryContent extends StatelessWidget {
   final ValueChanged<Book> onOpenBook;
   final VoidCallback onOpenPdf;
   final ValueChanged<Book> onDeleteBook;
+  final ValueChanged<Book> onRemoveBook;
   final ValueChanged<Book> onChangeCover;
   final ValueChanged<Book> onResetCover;
 
@@ -321,6 +328,9 @@ class _LibraryContent extends StatelessWidget {
                   book: book,
                   onOpen: () => onOpenBook(book),
                   onDelete: book.isDriveBook ? () => onDeleteBook(book) : null,
+                  onRemove: book.driveFileId == null
+                      ? () => onRemoveBook(book)
+                      : null,
                   onChangeCover: () => onChangeCover(book),
                   onResetCover: book.hasLiveSource
                       ? () => onResetCover(book)

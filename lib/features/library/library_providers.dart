@@ -660,6 +660,17 @@ class LibraryNotifier extends Notifier<List<Book>> {
     }
   }
 
+  /// Removes a purely local book (see [Book.driveFileId]) from the library
+  /// and its persisted record. Non-destructive: unlike [deleteDriveBook],
+  /// this never touches Google Drive — it only forgets this device's
+  /// library entry (and, with it, the book's reading progress). No-op if
+  /// [bookId] isn't in the library.
+  void removeFromLibrary(String bookId) {
+    if (!state.any((b) => b.id == bookId)) return;
+    state = [for (final b in state) if (b.id != bookId) b];
+    unawaited(_store.remove(bookId));
+  }
+
   DriveTransferProgressNotifier get progressNotifier =>
       ref.read(driveTransferProgressProvider.notifier);
 

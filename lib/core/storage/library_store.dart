@@ -35,6 +35,14 @@ class LibraryStore {
     await _writeMap(decoded);
   }
 
+  /// Deletes a single book record, mirroring [upsert]. No-op if [id] isn't
+  /// present.
+  Future<void> remove(String id) async {
+    final decoded = _readMap();
+    if (decoded.remove(id) == null) return;
+    await _writeMap(decoded);
+  }
+
   /// Replaces the entire persisted library with [books].
   Future<void> saveAll(List<Book> books) async {
     await _writeMap({for (final book in books) book.id: book.toJson()});

@@ -14,6 +14,9 @@ import '../../../core/theme/app_theme.dart';
 /// (Drive books only), is reachable both via a long-press (kept for
 /// backwards compatibility) and via the "⋮" overflow menu next to the
 /// title, both of which show the same confirm dialog before calling back.
+/// [onRemove], when provided (local books only — see [Book.driveFileId]),
+/// is only reachable via the overflow menu's "Remove from library" item,
+/// which shows its own (non-destructive-framed) confirm dialog first.
 /// [onChangeCover]/[onResetCover] back the overflow menu's cover-editing
 /// actions — see `_BookCardMenu`.
 class BookCard extends StatelessWidget {
@@ -22,6 +25,7 @@ class BookCard extends StatelessWidget {
     required this.book,
     required this.onOpen,
     this.onDelete,
+    this.onRemove,
     this.onChangeCover,
     this.onResetCover,
   });
@@ -29,6 +33,7 @@ class BookCard extends StatelessWidget {
   final Book book;
   final VoidCallback onOpen;
   final VoidCallback? onDelete;
+  final VoidCallback? onRemove;
   final VoidCallback? onChangeCover;
   final VoidCallback? onResetCover;
 
@@ -73,6 +78,7 @@ class BookCard extends StatelessWidget {
                       _BookCardMenu(
                         book: book,
                         onDelete: onDelete,
+                        onRemove: onRemove,
                         onChangeCover: onChangeCover,
                         onResetCover: onResetCover,
                       ),
@@ -230,8 +236,9 @@ class _CoverBanner extends StatelessWidget {
 }
 
 /// "Book options" overflow menu shown next to the title (see [BookCard]):
-/// change or reset the cover thumbnail, and — for Drive books only — delete.
-/// Hidden entirely (renders nothing) when none of its three actions could
+/// change or reset the cover thumbnail, and either — depending on
+/// [Book.driveFileId] — delete (Drive books) or remove from library (local
+/// books). Hidden entirely (renders nothing) when none of its actions could
 /// possibly apply, which in practice only happens for a book with no
 /// [onChangeCover] callback wired up at all (every call site currently wires
 /// one, so this is mostly a defensive fallback).
@@ -239,18 +246,23 @@ class _BookCardMenu extends StatelessWidget {
   const _BookCardMenu({
     required this.book,
     required this.onDelete,
+    required this.onRemove,
     required this.onChangeCover,
     required this.onResetCover,
   });
 
   final Book book;
   final VoidCallback? onDelete;
+  final VoidCallback? onRemove;
   final VoidCallback? onChangeCover;
   final VoidCallback? onResetCover;
 
   @override
   Widget build(BuildContext context) {
-    if (onChangeCover == null && onResetCover == null && onDelete == null) {
+    if (onChangeCover == null &&
+        onResetCover == null &&
+        onDelete == null &&
+        onRemove == null) {
       return const SizedBox.shrink();
     }
 
@@ -267,6 +279,10 @@ class _BookCardMenu extends StatelessWidget {
           case _BookCardAction.delete:
             if (await _confirmDeleteDialog(context, book.title)) {
               onDelete?.call();
+            }
+          case _BookCardAction.remove:
+            if (await _confirmRemoveDialog(context, book.title)) {
+              onRemove?.call();
             }
         }
       },
@@ -286,12 +302,17 @@ class _BookCardMenu extends StatelessWidget {
             value: _BookCardAction.delete,
             child: Text('Delete'),
           ),
+        if (onRemove != null)
+          const PopupMenuItem(
+            value: _BookCardAction.remove,
+            child: Text('Remove from library'),
+          ),
       ],
     );
   }
 }
 
-enum _BookCardAction { changeCover, resetCover, delete }
+enum _BookCardAction { changeCover, resetCover, delete, remove }
 
 /// Shared "Delete from Drive?" confirmation, used both by [BookCard]'s
 /// long-press (kept for backwards compatibility) and by [_BookCardMenu]'s
@@ -316,6 +337,35 @@ Future<bool> _confirmDeleteDialog(BuildContext context, String title) async {
           ),
           onPressed: () => Navigator.of(context).pop(true),
           child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
+}
+
+/// "Remove from library?" confirmation for local books' "Remove from
+/// library" menu item — framed as non-destructive (no file on disk or in
+/// Drive is touched, only the library entry and its progress), unlike
+/// [_confirmDeleteDialog]'s permanent-Drive-delete warning.
+Future<bool> _confirmRemoveDialog(BuildContext context, String title) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Remove from library?'),
+      content: Text(
+        '"$title" will be removed from your library and its reading '
+        'progress forgotten. This does not delete any file from your '
+        'device or Google Drive.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Remove'),
         ),
       ],
     ),
