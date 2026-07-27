@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/book.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/auth/auth_state.dart';
 import '../library/library_providers.dart';
@@ -74,18 +76,58 @@ class SyncController extends Notifier<void> {
     });
 
     // Trigger #3: debounced auto-push after a local syncable change —
-    // reading progress (including from `ReaderScreen`, which is the whole
-    // point of moving this here), favorite toggle, collection membership, a
-    // rename, or (via `collectionsProvider`) a collection
+    // favorite toggle, collection membership, a rename, a Drive
+    // add/remove, or (via `collectionsProvider`) a collection
     // create/rename/delete. See `_scheduleDebouncedAutoSync`'s doc for the
     // in-flight-sync guard that keeps this from ever re-triggering off its
     // own pull+merge.
+    //
+    // Reading *position* specifically is deliberately excluded here (see
+    // [_isReadingPositionOnlyChange]) now that `ReaderScreen` owns pushing
+    // its own book's row on a 4s dwell timer (and once more on close) — a
+    // page turn would otherwise also debounce a redundant full-library
+    // push a few seconds later for no benefit.
     ref.listen(libraryProvider, (previous, next) {
+      if (_isReadingPositionOnlyChange(previous, next)) return;
       _scheduleDebouncedAutoSync();
     });
     ref.listen(collectionsProvider, (previous, next) {
       _scheduleDebouncedAutoSync();
     });
+  }
+
+  /// True when every book present in both [previous] and [next] differs, if
+  /// at all, only in the fields `ReaderScreen.recordProgress` touches
+  /// (`currentPage`/`pageCount`/`lastOpenedAt`/`updatedAt`) — i.e. this
+  /// state change is purely a page turn, already covered by the reader's own
+  /// per-book push. False (schedule normally) for a book add/remove, any
+  /// other field changing, or when [previous] is null (nothing to diff
+  /// against yet).
+  bool _isReadingPositionOnlyChange(List<Book>? previous, List<Book> next) {
+    if (previous == null || previous.length != next.length) return false;
+    final previousById = {for (final b in previous) b.id: b};
+    for (final book in next) {
+      final prior = previousById[book.id];
+      if (prior == null) return false;
+      if (_differsBeyondReadingPosition(prior, book)) return false;
+    }
+    return true;
+  }
+
+  bool _differsBeyondReadingPosition(Book a, Book b) {
+    return a.title != b.title ||
+        a.author != b.author ||
+        a.coverGradientIndex != b.coverGradientIndex ||
+        a.coverThumbnail != b.coverThumbnail ||
+        a.assetPath != b.assetPath ||
+        a.filePath != b.filePath ||
+        a.fileBytes != b.fileBytes ||
+        a.openedOnWeb != b.openedOnWeb ||
+        a.source != b.source ||
+        a.driveFileId != b.driveFileId ||
+        a.driveSizeBytes != b.driveSizeBytes ||
+        a.isFavorite != b.isFavorite ||
+        !setEquals(a.collectionIds, b.collectionIds);
   }
 
   /// Whether Phase 4b auto-sync is allowed to run at all right now: a
@@ -107,7 +149,10 @@ class SyncController extends Notifier<void> {
   /// for why that can't be allowed to re-trigger itself) and a genuine
   /// concurrent edit, which the in-flight sync's push will already pick up.
   void _scheduleDebouncedAutoSync() {
-    if (!_canAutoSync()) return;
+    final configured = ref.read(syncCredentialsProvider).isConfigured;
+    final auth = ref.read(authProvider);
+    final canSync = auth is AuthStateSignedIn && auth.canSync;
+    if (!configured || !canSync) return;
     if (ref.read(syncRunProvider.notifier).isSyncing) return;
     _debounceTimer?.cancel();
     _debounceTimer = Timer(_autoSyncPushDebounce, _autoSync);

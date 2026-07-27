@@ -926,6 +926,24 @@ class LibraryNotifier extends Notifier<List<Book>> {
     return (added: added, updated: updated);
   }
 
+  /// Convenience wrapper around [mergeRemoteBooks] for `ReaderScreen`'s
+  /// per-book pull loop (`SyncEngine.pullBook`, on open and every 30s):
+  /// merges the single [remote] row using the exact same last-write-wins
+  /// semantics, and returns the resulting local `currentPage` for
+  /// [SyncedBook.bookId] *only* if the merge actually adopted it (added or
+  /// strictly-newer-updated) — null otherwise, telling the reader not to
+  /// jump the page. Kept here rather than reimplemented in `ReaderScreen` so
+  /// there's exactly one LWW comparison, matching [mergeRemoteBooks]'s own
+  /// doc.
+  int? mergeRemoteBookAndGetPage(SyncedBook remote) {
+    final result = mergeRemoteBooks([remote]);
+    if (result.added == 0 && result.updated == 0) return null;
+    for (final book in state) {
+      if (book.id == remote.bookId) return book.currentPage;
+    }
+    return null;
+  }
+
   DriveTransferProgressNotifier get progressNotifier =>
       ref.read(driveTransferProgressProvider.notifier);
 

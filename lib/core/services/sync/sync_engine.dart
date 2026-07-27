@@ -118,7 +118,12 @@ DateTime _parseTimestamp(Object? value) =>
 
 /// Outcome of [SyncEngine.testConnection] — a small closed set rather than a
 /// bare exception, so the Settings screen can render "Not configured" /
-/// "Connected" / "Error: …" without its own try/catch.
+/// "Connected" / "Error: …" without its own try/catch. [notConfigured] is
+/// never produced by [SyncEngine.testConnection] itself (callers already
+/// hold a `SupabaseClient` by the time they build a [SyncEngine] — see that
+/// class's doc — so they check [SyncCredentials.isConfigured] beforehand);
+/// it's kept here so callers that short-circuit before ever touching
+/// [SyncEngine] can still report through the same three-way result type.
 enum SyncConnectionStatus { notConfigured, connected, error }
 
 class SyncConnectionResult {
@@ -132,49 +137,42 @@ class SyncConnectionResult {
   final String? message;
 }
 
-/// Builds a `SupabaseClient` **at runtime** from a user-pasted
-/// [SyncCredentials] (BYOD — see the Phase 4a plan), rather than via
-/// `supabase_flutter`'s compile-time `Supabase.initialize` singleton, since
-/// the URL/anon key aren't known until the user has typed them into
-/// Settings. Talks to `pt_books`/`pt_collections` (see `schema.sql`);
-/// `pt_annotations` is defined in the schema for Phase 5 but not touched
-/// here.
+/// Talks to `pt_books`/`pt_collections` (see `schema.sql`) over a
+/// caller-supplied `SupabaseClient`; `pt_annotations` is defined in the
+/// schema for Phase 5 but not touched here.
 ///
-/// One [SyncEngine] instance owns exactly one underlying `SupabaseClient`
-/// (created lazily, on first use) — construction alone doesn't touch the
-/// network. Callers **must** call [dispose] when done with an instance:
+/// Unlike the Phase 4a/4b version of this class, a [SyncEngine] instance
+/// does **not** own or build its own `SupabaseClient` — it's handed one
+/// (see [supabaseClientProvider] in `features/settings/settings_providers.dart`).
 /// `SupabaseClient` eagerly spins up a JSON-decoding isolate and a realtime
-/// socket internally, and only [dispose] tears those back down.
+/// socket internally, so constructing (and disposing) a fresh one per
+/// operation — as every push/pull previously did — is expensive enough to
+/// visibly lag the UI; [supabaseClientProvider] instead builds exactly one,
+/// long-lived client per set of credentials, shared by every sync path
+/// (the reader's per-book read/write loop and the full-library
+/// `SyncNotifier`/`SyncController`), and this class is now a thin,
+/// stateless wrapper around whichever client it's given. A [SyncEngine]
+/// itself is cheap to construct and never needs disposing — only the
+/// shared client does.
 class SyncEngine {
-  SyncEngine(this.credentials);
+  const SyncEngine(this._client);
 
-  final SyncCredentials credentials;
+  final SupabaseClient _client;
 
   static const _booksTable = 'pt_books';
   static const _collectionsTable = 'pt_collections';
 
-  SupabaseClient? _client;
-
-  SupabaseClient get _requireClient =>
-      _client ??= SupabaseClient(credentials.url.trim(), credentials.anonKey.trim());
-
-  Future<void> dispose() async {
-    await _client?.dispose();
-    _client = null;
-  }
-
   /// A lightweight reachability + schema check: selects one row (if any)
-  /// from `pt_books`. Distinguishes "not configured" (no URL/key saved yet)
-  /// from "connected" from "error" — the error case covers both a bad
-  /// URL/key and a URL/key that's fine but `schema.sql` hasn't been run yet
-  /// (surfaced as a Postgres "relation does not exist" message, which is
+  /// from `pt_books`. Callers check [SyncCredentials.isConfigured] (and thus
+  /// whether a shared client even exists — see [supabaseClientProvider])
+  /// before ever constructing a [SyncEngine], so this only ever
+  /// distinguishes "connected" from "error" — the error case covers both a
+  /// bad URL/key and a URL/key that's fine but `schema.sql` hasn't been run
+  /// yet (surfaced as a Postgres "relation does not exist" message, which is
   /// itself a useful hint to the user).
   Future<SyncConnectionResult> testConnection() async {
-    if (!credentials.isConfigured) {
-      return const SyncConnectionResult(SyncConnectionStatus.notConfigured);
-    }
     try {
-      await _requireClient.from(_booksTable).select('user_id').limit(1);
+      await _client.from(_booksTable).select('user_id').limit(1);
       return const SyncConnectionResult(SyncConnectionStatus.connected);
     } on PostgrestException catch (e) {
       return SyncConnectionResult(SyncConnectionStatus.error, e.message);
@@ -195,18 +193,41 @@ class SyncEngine {
     final rows = [
       for (final book in books) SyncedBook.fromBook(book).toRow(userId),
     ];
-    await _requireClient
-        .from(_booksTable)
-        .upsert(rows, onConflict: 'user_id,book_id');
+    await _client.from(_booksTable).upsert(rows, onConflict: 'user_id,book_id');
   }
 
   /// Every `pt_books` row belonging to [userId].
   Future<List<SyncedBook>> pullBooks(String userId) async {
-    final rows = await _requireClient
+    final rows = await _client.from(_booksTable).select().eq('user_id', userId);
+    return [for (final row in rows) SyncedBook.fromRow(row)];
+  }
+
+  /// Single-row equivalent of [pullBooks], used by `ReaderScreen`'s per-book
+  /// sync loop instead of pulling (and merging) every book in the library
+  /// just to check on the one currently open. Returns null if [bookId] has
+  /// no row yet for [userId] (e.g. never pushed from any device).
+  Future<SyncedBook?> pullBook(String userId, String bookId) async {
+    final rows = await _client
         .from(_booksTable)
         .select()
-        .eq('user_id', userId);
-    return [for (final row in rows) SyncedBook.fromRow(row)];
+        .eq('user_id', userId)
+        .eq('book_id', bookId)
+        .limit(1);
+    if (rows.isEmpty) return null;
+    return SyncedBook.fromRow(rows.first);
+  }
+
+  /// Single-row equivalent of [pushBooks]: upserts [book] as one full
+  /// `pt_books` row for [userId]. Deliberately writes every column
+  /// [SyncedBook.toRow] knows about (title/author/current_page/page_count/
+  /// is_favorite/drive_file_id/collection_ids/updated_at), not just
+  /// `current_page` — an upsert of a partial row would otherwise null out
+  /// every column this call doesn't mention for a book that already has a
+  /// remote row. Used by `ReaderScreen`'s per-book dwell-timer push so a
+  /// reading-position update doesn't require pushing the whole library.
+  Future<void> pushBook(String userId, Book book) async {
+    final row = SyncedBook.fromBook(book).toRow(userId);
+    await _client.from(_booksTable).upsert(row, onConflict: 'user_id,book_id');
   }
 
   /// Upserts every one of [collections] as [userId]'s rows — see
@@ -220,14 +241,14 @@ class SyncEngine {
       for (final collection in collections)
         SyncedCollection.fromCollection(collection).toRow(userId),
     ];
-    await _requireClient
+    await _client
         .from(_collectionsTable)
         .upsert(rows, onConflict: 'user_id,id');
   }
 
   /// Every `pt_collections` row belonging to [userId].
   Future<List<SyncedCollection>> pullCollections(String userId) async {
-    final rows = await _requireClient
+    final rows = await _client
         .from(_collectionsTable)
         .select()
         .eq('user_id', userId);

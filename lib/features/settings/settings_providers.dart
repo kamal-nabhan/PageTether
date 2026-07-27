@@ -1,5 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase/supabase.dart' show PostgrestException;
+import 'package:supabase/supabase.dart' show PostgrestException, SupabaseClient;
 
 import '../../core/models/book.dart';
 import '../../core/models/collection.dart';
@@ -45,6 +47,31 @@ final syncCredentialsProvider =
       SyncCredentialsNotifier.new,
     );
 
+/// The ONE shared, long-lived `SupabaseClient` used by every sync path —
+/// the full-library `SyncNotifier`/`SyncController` sync and `ReaderScreen`'s
+/// per-book read/write loop alike (see `SyncEngine`'s class doc). Null while
+/// [syncCredentialsProvider] isn't configured; callers must check that
+/// before reading this.
+///
+/// `SupabaseClient` eagerly spins up a JSON-decoding isolate and a realtime
+/// socket internally at construction time — building (and disposing) a
+/// fresh one for every push/pull, as the Phase 4a/4b code did, was the root
+/// cause of the reader visibly lagging on every page turn. This provider
+/// instead builds exactly one client and keeps it alive for as long as
+/// [syncCredentialsProvider]'s value doesn't change: watching that provider
+/// means Riverpod disposes the old client (via [Ref.onDispose] below) and
+/// rebuilds a new one only when the user actually edits/clears their
+/// Supabase URL or anon key, never per sync operation.
+final supabaseClientProvider = Provider<SupabaseClient?>((ref) {
+  final credentials = ref.watch(syncCredentialsProvider);
+  if (!credentials.isConfigured) return null;
+  final client = SupabaseClient(credentials.url.trim(), credentials.anonKey.trim());
+  ref.onDispose(() {
+    unawaited(client.dispose());
+  });
+  return client;
+});
+
 /// Status of the Settings screen's "Test connection" action.
 sealed class SyncConnectionState {
   const SyncConnectionState();
@@ -75,26 +102,30 @@ class SyncConnectionNotifier extends Notifier<SyncConnectionState> {
   @override
   SyncConnectionState build() => const SyncConnectionUnknown();
 
-  /// Builds a throwaway [SyncEngine] from whatever's currently saved in
-  /// [syncCredentialsProvider], runs [SyncEngine.testConnection], and always
-  /// disposes it afterwards — see `SyncEngine`'s class doc for why disposal
-  /// matters (it owns a JSON isolate + a realtime socket internally).
+  /// Runs [SyncEngine.testConnection] against the shared
+  /// [supabaseClientProvider] client. No disposal needed here — that client
+  /// is long-lived and owned by [supabaseClientProvider] itself (see its
+  /// doc), not by this one-off check.
   Future<void> test() async {
     final credentials = ref.read(syncCredentialsProvider);
-    state = const SyncConnectionTesting();
-    final engine = SyncEngine(credentials);
-    try {
-      final result = await engine.testConnection();
-      state = switch (result.status) {
-        SyncConnectionStatus.notConfigured => const SyncConnectionNotConfigured(),
-        SyncConnectionStatus.connected => const SyncConnectionOk(),
-        SyncConnectionStatus.error => SyncConnectionFailed(
-          result.message ?? 'Unknown error',
-        ),
-      };
-    } finally {
-      await engine.dispose();
+    if (!credentials.isConfigured) {
+      state = const SyncConnectionNotConfigured();
+      return;
     }
+    state = const SyncConnectionTesting();
+    final client = ref.read(supabaseClientProvider);
+    if (client == null) {
+      state = const SyncConnectionNotConfigured();
+      return;
+    }
+    final result = await SyncEngine(client).testConnection();
+    state = switch (result.status) {
+      SyncConnectionStatus.notConfigured => const SyncConnectionNotConfigured(),
+      SyncConnectionStatus.connected => const SyncConnectionOk(),
+      SyncConnectionStatus.error => SyncConnectionFailed(
+        result.message ?? 'Unknown error',
+      ),
+    };
   }
 
   void reset() => state = const SyncConnectionUnknown();
@@ -285,10 +316,24 @@ class SyncNotifier extends Notifier<SyncRunState> {
       return;
     }
 
+    final client = ref.read(supabaseClientProvider);
+    if (client == null) {
+      // Shouldn't happen — `credentials.isConfigured` was just checked above
+      // and `supabaseClientProvider` builds a client whenever that's true —
+      // but fail quietly rather than crash if it ever does.
+      if (!silent) {
+        state = const SyncRunError(
+          'Add your Supabase URL and anon key below, then run schema.sql in '
+          'your Supabase project, before syncing.',
+        );
+      }
+      return;
+    }
+
     if (!silent) state = const SyncRunInProgress('Pulling remote changes…');
     final autoStatus = ref.read(autoSyncStatusProvider.notifier);
     autoStatus.setSyncing();
-    final engine = SyncEngine(credentials);
+    final engine = SyncEngine(client);
     try {
       // Pull + merge BEFORE pushing. pushBooks/pushCollections upsert this
       // device's rows unconditionally (no updated_at comparison), so pushing
@@ -325,8 +370,6 @@ class SyncNotifier extends Notifier<SyncRunState> {
     } catch (e) {
       autoStatus.setFailed('$e');
       if (!silent) state = SyncRunError('Sync failed: $e');
-    } finally {
-      await engine.dispose();
     }
   }
 
