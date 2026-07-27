@@ -20,6 +20,7 @@ Future<void> main() async {
   final store = LibraryStore(prefs);
   final initialBooks = await loadInitialLibrary(store);
   final initialCollections = await store.loadCollections();
+  final initialViewMode = await store.loadViewMode();
 
   runApp(
     ProviderScope(
@@ -29,6 +30,7 @@ Future<void> main() async {
         collectionsProvider.overrideWith(
           () => CollectionsNotifier(initialCollections),
         ),
+        viewModeProvider.overrideWith(() => ViewModeNotifier(initialViewMode)),
       ],
       child: const PageTetherApp(),
     ),

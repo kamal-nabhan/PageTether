@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
 import '../models/collection.dart';
+import '../models/library_view_mode.dart';
 
 /// Local persistence for the library's book metadata and user-defined
 /// collections.
@@ -22,6 +23,7 @@ class LibraryStore {
 
   static const _key = 'pt.library.v1';
   static const _collectionsKey = 'pt.collections.v1';
+  static const _viewModeKey = 'pt.viewmode.v1';
 
   final SharedPreferences _prefs;
 
@@ -78,6 +80,24 @@ class LibraryStore {
       _collectionsKey,
       jsonEncode([for (final c in collections) c.toJson()]),
     );
+  }
+
+  /// Loads the persisted library view mode (list vs. grid density — see
+  /// [LibraryViewMode]), defaulting to [LibraryViewMode.gridMedium] —
+  /// today's look — if nothing has been saved yet, or the saved value is
+  /// unrecognized (e.g. from a future app version rolled back).
+  Future<LibraryViewMode> loadViewMode() async {
+    final raw = _prefs.getString(_viewModeKey);
+    if (raw == null) return LibraryViewMode.gridMedium;
+    return LibraryViewMode.values.firstWhere(
+      (mode) => mode.name == raw,
+      orElse: () => LibraryViewMode.gridMedium,
+    );
+  }
+
+  /// Persists the user's chosen library view mode.
+  Future<void> saveViewMode(LibraryViewMode mode) async {
+    await _prefs.setString(_viewModeKey, mode.name);
   }
 
   Map<String, dynamic> _readMap() {

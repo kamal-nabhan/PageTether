@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/book.dart';
+import '../../core/models/library_view_mode.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/auth/auth_state.dart';
 import '../../core/services/window/window_focus_service.dart'
@@ -11,10 +12,12 @@ import '../reader/reader_screen.dart';
 import 'library_providers.dart';
 import 'widgets/add_to_collection_dialog.dart';
 import 'widgets/book_card.dart';
+import 'widgets/book_list_tile.dart';
 import 'widgets/collections_sheet.dart';
 import 'widgets/drive_auth_panel.dart';
 import 'widgets/library_sidebar.dart';
 import 'widgets/rename_book_dialog.dart';
+import 'widgets/view_mode_control.dart';
 
 /// Breakpoint above which the permanent sidebar replaces the bottom nav.
 const double kDesktopBreakpoint = 800;
@@ -244,6 +247,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     final selection = ref.watch(selectedCollectionProvider);
     final filteredBooks = filterBooksForSelection(books, selection);
     final headingLabel = _headingLabelFor(ref, selection);
+    final viewMode = ref.watch(viewModeProvider);
 
     // Hydrate the grid from Drive exactly once per sign-in transition (not
     // automatically on launch — only once the user actually connects, per
@@ -266,9 +270,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
           isLibraryEmpty: books.isEmpty,
           selection: selection,
           headingLabel: headingLabel,
-          crossAxisCount: isDesktop
-              ? (constraints.maxWidth / 240).floor().clamp(3, 6)
-              : (constraints.maxWidth / 190).floor().clamp(2, 3),
+          viewMode: viewMode,
+          onViewModeChanged: (mode) =>
+              ref.read(viewModeProvider.notifier).select(mode),
           onOpenBook: (book) => _openBook(context, ref, book),
           onOpenPdf: () => _openPdf(context, ref),
           onDeleteBook: (book) => _deleteDriveBook(ref, book),
@@ -351,7 +355,8 @@ class _LibraryContent extends StatelessWidget {
     required this.isLibraryEmpty,
     required this.selection,
     required this.headingLabel,
-    required this.crossAxisCount,
+    required this.viewMode,
+    required this.onViewModeChanged,
     required this.onOpenBook,
     required this.onOpenPdf,
     required this.onDeleteBook,
@@ -373,7 +378,13 @@ class _LibraryContent extends StatelessWidget {
   final bool isLibraryEmpty;
   final LibrarySelection selection;
   final String headingLabel;
-  final int crossAxisCount;
+
+  /// Current list/grid display density — see [LibraryViewMode]. Read here
+  /// (rather than watched via Riverpod directly) so this remains a plain
+  /// [StatelessWidget], matching how every other display input already
+  /// flows in from `LibraryScreen`.
+  final LibraryViewMode viewMode;
+  final ValueChanged<LibraryViewMode> onViewModeChanged;
   final ValueChanged<Book> onOpenBook;
   final VoidCallback onOpenPdf;
   final ValueChanged<Book> onDeleteBook;
@@ -403,57 +414,121 @@ class _LibraryContent extends StatelessWidget {
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(24, 28, 24, 8),
           sliver: SliverToBoxAdapter(
-            child: Column(
+            child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  headingLabel,
-                  style: Theme.of(context).textTheme.headlineMedium,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        headingLabel,
+                        style: Theme.of(context).textTheme.headlineMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${books.length} book${books.length == 1 ? '' : 's'}',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  '${books.length} book${books.length == 1 ? '' : 's'}',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
+                const SizedBox(width: 12),
+                ViewModeControl(mode: viewMode, onChanged: onViewModeChanged),
               ],
             ),
           ),
         ),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-          sliver: SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: crossAxisCount,
-              mainAxisSpacing: 20,
-              crossAxisSpacing: 20,
-              childAspectRatio: 0.62,
+        if (viewMode == LibraryViewMode.list)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+            sliver: SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final book = books[index];
+                  return BookListTile(
+                    book: book,
+                    onOpen: () => onOpenBook(book),
+                    onDelete: book.isDriveBook
+                        ? () => onDeleteBook(book)
+                        : null,
+                    onRemove: book.driveFileId == null
+                        ? () => onRemoveBook(book)
+                        : null,
+                    onChangeCover: () => onChangeCover(book),
+                    onResetCover: book.hasLiveSource
+                        ? () => onResetCover(book)
+                        : null,
+                    onToggleFavorite: () => onToggleFavorite(book),
+                    onAddToCollection: () => onAddToCollection(book),
+                    onRename: () => onRenameBook(book),
+                  );
+                },
+                childCount: books.length,
+              ),
             ),
-            delegate: SliverChildBuilderDelegate(
-              (context, index) {
-                final book = books[index];
-                return BookCard(
-                  book: book,
-                  onOpen: () => onOpenBook(book),
-                  onDelete: book.isDriveBook ? () => onDeleteBook(book) : null,
-                  onRemove: book.driveFileId == null
-                      ? () => onRemoveBook(book)
-                      : null,
-                  onChangeCover: () => onChangeCover(book),
-                  onResetCover: book.hasLiveSource
-                      ? () => onResetCover(book)
-                      : null,
-                  onToggleFavorite: () => onToggleFavorite(book),
-                  onAddToCollection: () => onAddToCollection(book),
-                  onRename: () => onRenameBook(book),
-                );
-              },
-              childCount: books.length,
+          )
+        else
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+            sliver: SliverGrid(
+              gridDelegate: _gridDelegateFor(viewMode),
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final book = books[index];
+                  return BookCard(
+                    book: book,
+                    onOpen: () => onOpenBook(book),
+                    onDelete: book.isDriveBook
+                        ? () => onDeleteBook(book)
+                        : null,
+                    onRemove: book.driveFileId == null
+                        ? () => onRemoveBook(book)
+                        : null,
+                    onChangeCover: () => onChangeCover(book),
+                    onResetCover: book.hasLiveSource
+                        ? () => onResetCover(book)
+                        : null,
+                    onToggleFavorite: () => onToggleFavorite(book),
+                    onAddToCollection: () => onAddToCollection(book),
+                    onRename: () => onRenameBook(book),
+                  );
+                },
+                childCount: books.length,
+              ),
             ),
           ),
-        ),
       ],
     );
   }
+}
+
+/// Maps a grid [LibraryViewMode] to its tile size/spacing. [maxCrossAxisExtent]
+/// is the per-tile cap [SliverGridDelegateWithMaxCrossAxisExtent] fits as many
+/// columns of as will cleanly divide the available width — unlike the
+/// previous fixed-column-count delegate, this needs no separate
+/// desktop/mobile breakpoint math to look right at any width.
+/// [LibraryViewMode.gridMedium]'s 230/20/0.62 reproduces the pre-Phase-4
+/// default grid's look (previously a fixed 3-6 column desktop / 2-3 column
+/// mobile count anchored to the same ~230px tile width).
+SliverGridDelegateWithMaxCrossAxisExtent _gridDelegateFor(
+  LibraryViewMode mode,
+) {
+  final (maxExtent, spacing, aspectRatio) = switch (mode) {
+    LibraryViewMode.gridSmall => (160.0, 14.0, 0.6),
+    LibraryViewMode.gridMedium => (230.0, 20.0, 0.62),
+    LibraryViewMode.gridLarge => (320.0, 24.0, 0.66),
+    // Unreachable: this helper is only called from the grid branch above,
+    // never when `viewMode` is `list` — kept here only so the switch stays
+    // exhaustive over every `LibraryViewMode` variant.
+    LibraryViewMode.list => (230.0, 20.0, 0.62),
+  };
+  return SliverGridDelegateWithMaxCrossAxisExtent(
+    maxCrossAxisExtent: maxExtent,
+    mainAxisSpacing: spacing,
+    crossAxisSpacing: spacing,
+    childAspectRatio: aspectRatio,
+  );
 }
 
 /// Slim banner showing the current [driveSyncProvider] state: hidden when

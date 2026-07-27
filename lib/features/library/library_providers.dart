@@ -15,6 +15,7 @@ import 'package:googleapis/drive/v3.dart' show DetailedApiRequestError;
 
 import '../../core/models/book.dart';
 import '../../core/models/collection.dart';
+import '../../core/models/library_view_mode.dart';
 import '../../core/pdf/pdf_document_tools.dart';
 import '../../core/pdf/pdf_source.dart';
 import '../../core/services/auth/auth_exceptions.dart';
@@ -139,6 +140,34 @@ final libraryStoreProvider = Provider<LibraryStore>((ref) {
     'libraryStoreProvider must be overridden in main() with a real LibraryStore',
   );
 });
+
+/// Persisted list/grid density for the library dashboard (see
+/// [LibraryViewMode]). Seeded in `main()` with whatever [LibraryStore]
+/// already had saved (mirroring [LibraryNotifier]/[CollectionsNotifier]'s
+/// constructor-seeded pattern) so the very first frame already reflects the
+/// user's last choice — the [build] default only matters for tests/previews
+/// that don't override it. Every call to [select] persists the new choice
+/// immediately via [LibraryStore.saveViewMode].
+class ViewModeNotifier extends Notifier<LibraryViewMode> {
+  ViewModeNotifier([this._initial = LibraryViewMode.gridMedium]);
+
+  final LibraryViewMode _initial;
+
+  @override
+  LibraryViewMode build() => _initial;
+
+  LibraryStore get _store => ref.read(libraryStoreProvider);
+
+  void select(LibraryViewMode mode) {
+    if (state == mode) return;
+    state = mode;
+    unawaited(_store.saveViewMode(mode));
+  }
+}
+
+final viewModeProvider = NotifierProvider<ViewModeNotifier, LibraryViewMode>(
+  ViewModeNotifier.new,
+);
 
 /// Status of the most recent Drive hydrate/upload/download/delete action.
 ///
