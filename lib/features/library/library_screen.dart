@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -57,6 +55,17 @@ class LibraryScreen extends ConsumerStatefulWidget {
 /// to the independently-debounced [_maybeAutoRefreshFromDrive] and
 /// [_maybeAutoSyncOnResume], so neither ever stacks duplicate `files.list`
 /// or sync calls.
+///
+/// Phase 4b's other two auto-sync triggers ("on becoming ready" and the
+/// debounced "on local change" push) used to live here too, as widget-scoped
+/// `ref.listen`s in [build]. They were moved to the app-root-level
+/// `SyncController` (`features/settings/sync_controller.dart`) because this
+/// screen isn't always the current route — reading happens in
+/// `ReaderScreen`, pushed on top of the library, and this widget's
+/// `ref.listen`s don't reliably fire for a `libraryProvider` change made
+/// while some other screen is on top. The resume/focus trigger below stays
+/// here since it's a lifecycle event tied to this widget's observer, not a
+/// state-change listener, so it doesn't have that problem.
 class _LibraryScreenState extends ConsumerState<LibraryScreen>
     with WidgetsBindingObserver {
   /// Minimum gap between auto-refreshes triggered by resuming/refocusing —
@@ -71,14 +80,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
   /// two triggers can fire on different schedules.
   static const _autoSyncResumeDebounce = Duration(seconds: 30);
 
-  /// Debounce for auto-sync-on-local-change (Phase 4b): coalesces a burst of
-  /// edits (e.g. flipping through pages, several favorite toggles) into one
-  /// sync a few seconds after the *last* one, rather than a sync per edit.
-  static const _autoSyncPushDebounce = Duration(seconds: 5);
-
   DateTime? _lastAutoRefresh;
   DateTime? _lastAutoSyncResume;
-  Timer? _autoSyncDebounceTimer;
 
   @override
   void initState() {
@@ -93,7 +96,6 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     window_focus.unregisterDesktopWindowFocusListener();
-    _autoSyncDebounceTimer?.cancel();
     super.dispose();
   }
 
@@ -154,25 +156,6 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     }
     _lastAutoSyncResume = now;
     ref.read(syncRunProvider.notifier).autoSync();
-  }
-
-  /// Debounced auto-push trigger (Phase 4b, trigger #3) — scheduled by the
-  /// `libraryProvider`/`collectionsProvider` listeners in [build] whenever
-  /// either changes (reading progress, favorite toggle, collection
-  /// add/remove/rename/create/delete, a rename, etc). Skips scheduling
-  /// entirely while a sync is already running (`SyncNotifier.isSyncing`) —
-  /// that covers both a change that's actually this sync's own pull+merge
-  /// landing (see `SyncNotifier.isSyncing`'s doc for why that can't be
-  /// allowed to re-trigger itself) and a genuine concurrent edit, which the
-  /// in-flight sync's push will already pick up.
-  void _scheduleDebouncedAutoSync() {
-    if (!mounted || !_canAutoSync()) return;
-    if (ref.read(syncRunProvider.notifier).isSyncing) return;
-    _autoSyncDebounceTimer?.cancel();
-    _autoSyncDebounceTimer = Timer(_autoSyncPushDebounce, () {
-      if (!mounted) return;
-      ref.read(syncRunProvider.notifier).autoSync();
-    });
   }
 
   Future<void> _openPdf(BuildContext context, WidgetRef ref) async {
@@ -335,46 +318,20 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     // Hydrate the grid from Drive exactly once per sign-in transition (not
     // automatically on launch — only once the user actually connects, per
     // the Phase 2 plan), by watching for the moment `hasDriveAccess` first
-    // becomes true.
+    // becomes true. This stays here (rather than moving to `SyncController`
+    // alongside the Phase 4b sync triggers) because it's Drive library
+    // hydration, not Supabase sync.
     //
-    // Also the Phase 4b "on becoming ready" auto-sync trigger (#1): the
-    // moment `canSync` (Supabase configured + signed in to Google) first
-    // becomes true — right after connecting *either* half, whichever
-    // happens second — kick off one sync immediately rather than waiting
-    // for the next resume/local-change trigger.
+    // The Phase 4b "on becoming ready"/"on local change" auto-sync triggers
+    // that used to live in this same listener block now live in
+    // `SyncController` (`features/settings/sync_controller.dart`), instanced
+    // once at app root — see that class's doc for why.
     ref.listen<AuthState>(authProvider, (previous, next) {
       final wasReady = previous is AuthStateSignedIn && previous.hasDriveAccess;
       final isReady = next is AuthStateSignedIn && next.hasDriveAccess;
       if (isReady && !wasReady) {
         ref.read(libraryProvider.notifier).hydrateFromDrive();
       }
-
-      final couldSyncBefore = previous is AuthStateSignedIn && previous.canSync;
-      final canSyncNow = next is AuthStateSignedIn && next.canSync;
-      if (canSyncNow && !couldSyncBefore && _canAutoSync()) {
-        ref.read(syncRunProvider.notifier).autoSync();
-      }
-    });
-
-    // The other half of trigger #1: saving Supabase credentials while
-    // already signed in to Google.
-    ref.listen(syncCredentialsProvider, (previous, next) {
-      final wasConfigured = previous?.isConfigured ?? false;
-      if (next.isConfigured && !wasConfigured && _canAutoSync()) {
-        ref.read(syncRunProvider.notifier).autoSync();
-      }
-    });
-
-    // Trigger #3: debounced auto-push after a local syncable change —
-    // reading progress, favorite toggle, collection membership, a rename,
-    // or (via `collectionsProvider`) a collection create/rename/delete. See
-    // `_scheduleDebouncedAutoSync`'s doc for the in-flight-sync guard that
-    // keeps this from ever re-triggering off its own pull+merge.
-    ref.listen(libraryProvider, (previous, next) {
-      _scheduleDebouncedAutoSync();
-    });
-    ref.listen(collectionsProvider, (previous, next) {
-      _scheduleDebouncedAutoSync();
     });
 
     return LayoutBuilder(
