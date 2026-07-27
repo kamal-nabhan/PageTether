@@ -8,17 +8,18 @@
 -- idempotent (`create table if not exists`, `create index if not exists`).
 --
 -- Rows are keyed by `user_id`, PageTether's stable Google-account identity
--- (see `AuthNotifier.syncUserId` in the app) — NOT Supabase Auth. Because a
--- BYOD project is presumed private to one person/household (you created it,
--- you hold the only anon key), Row Level Security is left OFF here rather
--- than modeled around `auth.uid()`, which would require signing in to
--- *Supabase* itself (a separate concern from PageTether's Google sign-in)
--- for no real benefit in a single-tenant database. If you'd rather turn RLS
--- on anyway (e.g. you're exposing this project's anon key more broadly than
--- "just this app on my own devices"), the permissive policy block at the
--- bottom does that safely — every row is still readable/writable by anyone
--- holding the anon key either way, so enabling it only changes *how* that's
--- expressed, not what's actually allowed.
+-- (see `AuthNotifier.syncUserId` in the app) — NOT Supabase Auth. This file
+-- ENABLES Row Level Security on every table with a PERMISSIVE anon policy
+-- (`using (true) with check (true)`) at the bottom, so it works whether or
+-- not Supabase pre-enabled RLS on your tables (a table with RLS on and no
+-- policy rejects every write — "new row violates row-level security policy").
+-- Be clear-eyed about what this means for a BYOD project: security here is
+-- "keep your anon key private" — anyone holding the anon key can read/write
+-- every row, because we key on a plain `user_id` column, not `auth.uid()`.
+-- That's fine for a project private to one person/household. True per-user
+-- isolation would require signing in to *Supabase* itself (Supabase Auth +
+-- `auth.uid()`-based policies) — a future hardening option, separate from
+-- PageTether's Google sign-in.
 
 -- ─────────────────────────────────────────────────────────────
 -- Books: reading position, favorite, metadata, collection membership.
@@ -72,25 +73,26 @@ create index if not exists pt_annotations_user_book_idx
   on pt_annotations (user_id, book_id);
 
 -- ─────────────────────────────────────────────────────────────
--- Optional: Row Level Security.
+-- Row Level Security: ENABLED with a permissive anon policy.
 --
--- Left disabled by default (see the note at the top of this file). If you
--- want it on anyway, uncomment the block below — it's a *permissive* policy
--- (every request using the anon key can read/write every row), so it
--- doesn't require Supabase Auth or change what the app can do; it just
--- makes the "anyone with the anon key" trust boundary explicit at the
--- database level instead of implicit.
+-- Why enable it (vs. leaving it off): Supabase enables RLS on new tables by
+-- default, and a table with RLS on but NO policy rejects every write. So this
+-- block guarantees the script works either way. The policy is *permissive*
+-- (`using (true) with check (true)`): with only the anon key and no Supabase
+-- Auth it can't isolate per user, so this makes the "anyone with the anon key
+-- has full access" boundary explicit rather than restricting it. Idempotent —
+-- safe to re-run.
 -- ─────────────────────────────────────────────────────────────
--- alter table pt_books enable row level security;
--- alter table pt_collections enable row level security;
--- alter table pt_annotations enable row level security;
---
--- drop policy if exists pt_books_anon_all on pt_books;
--- create policy pt_books_anon_all on pt_books
---   for all using (true) with check (true);
--- drop policy if exists pt_collections_anon_all on pt_collections;
--- create policy pt_collections_anon_all on pt_collections
---   for all using (true) with check (true);
--- drop policy if exists pt_annotations_anon_all on pt_annotations;
--- create policy pt_annotations_anon_all on pt_annotations
---   for all using (true) with check (true);
+alter table pt_books enable row level security;
+alter table pt_collections enable row level security;
+alter table pt_annotations enable row level security;
+
+drop policy if exists pt_books_anon_all on pt_books;
+create policy pt_books_anon_all on pt_books
+  for all using (true) with check (true);
+drop policy if exists pt_collections_anon_all on pt_collections;
+create policy pt_collections_anon_all on pt_collections
+  for all using (true) with check (true);
+drop policy if exists pt_annotations_anon_all on pt_annotations;
+create policy pt_annotations_anon_all on pt_annotations
+  for all using (true) with check (true);
