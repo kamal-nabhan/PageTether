@@ -98,10 +98,12 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _bootstrapWebOrMobile() async {
-    if (kIsWeb && !GoogleIdentityAuth.instance.hasWebClientId) {
+    if (!GoogleIdentityAuth.instance.hasWebClientId) {
+      // Web needs this as `clientId`; Android/iOS need it as `serverClientId`.
       state = const AuthStateUnavailable(
-        'GOOGLE_WEB_CLIENT_ID was not provided at build time. Run/build '
-        'with --dart-define=GOOGLE_WEB_CLIENT_ID=<your OAuth web client id>.',
+        'GOOGLE_WEB_CLIENT_ID was not provided at build time. Run/build with '
+        '--dart-define=GOOGLE_WEB_CLIENT_ID=<your OAuth web client id> '
+        '(the same Web client id on web, Android, and iOS).',
       );
       return;
     }

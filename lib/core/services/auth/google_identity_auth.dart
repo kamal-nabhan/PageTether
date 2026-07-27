@@ -38,8 +38,13 @@ class GoogleIdentityAuth {
   /// that this repo does not currently ship, so `clientId` is left null
   /// there — mobile sign-in is wired for correctness but unverified.
   Future<void> ensureInitialized() {
+    final webClientId = kGoogleWebClientId.isNotEmpty ? kGoogleWebClientId : null;
     return _initFuture ??= _signIn.initialize(
-      clientId: kIsWeb && kGoogleWebClientId.isNotEmpty ? kGoogleWebClientId : null,
+      // Web uses the OAuth *Web* client id as `clientId`; Android/iOS require
+      // that same Web client id as `serverClientId` (each platform's own
+      // sign-in is bound via its Android/iOS OAuth client + SHA-1 / bundle id).
+      clientId: kIsWeb ? webClientId : null,
+      serverClientId: kIsWeb ? null : webClientId,
     );
   }
 
@@ -61,7 +66,12 @@ class GoogleIdentityAuth {
   /// (if any) arrive via [authenticationEvents], not the return value.
   Future<void> attemptLightweightAuthentication() async {
     await ensureInitialized();
-    await _signIn.attemptLightweightAuthentication();
+    try {
+      await _signIn.attemptLightweightAuthentication();
+    } catch (_) {
+      // Best-effort silent restore: a missing session or (mis)configuration
+      // must never crash startup — the user can still sign in explicitly.
+    }
   }
 
   /// Mobile-only interactive sign-in. Returns null if the user cancelled
