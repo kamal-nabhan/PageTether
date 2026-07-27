@@ -65,6 +65,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           Text('Sync identity', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
           const _SyncIdentityCard(),
+          const SizedBox(height: 8),
+          const _AutoSyncStatusLine(),
           const SizedBox(height: 32),
           Text(
             'Your Supabase project',
@@ -180,6 +182,48 @@ class _SyncIdentityCard extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Subtle Phase 4b background-sync indicator — the Settings-screen twin of
+/// `library_sidebar.dart`'s `_AutoSyncStatusRow`, reading the same
+/// [autoSyncStatusProvider] so this reflects automatic syncs too, not just
+/// explicit "Sync now" presses (that's still [_SyncNowSection] below, an
+/// intentionally separate, more detailed/dismissible state machine — see
+/// `AutoSyncStatus`'s class doc for why the two are kept apart).
+class _AutoSyncStatusLine extends ConsumerWidget {
+  const _AutoSyncStatusLine();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(autoSyncStatusProvider);
+    final (IconData, String)? display = switch (status) {
+      AutoSyncIdle() => null,
+      AutoSyncSyncing() => (Icons.sync_rounded, 'Background sync: syncing…'),
+      AutoSyncSynced(:final at) => (
+        Icons.cloud_done_rounded,
+        'Background sync: synced · ${formatSyncAge(at)}',
+      ),
+      AutoSyncFailed() => (
+        Icons.cloud_off_rounded,
+        'Background sync paused — will retry automatically',
+      ),
+    };
+    if (display == null) return const SizedBox.shrink();
+    final (icon, label) = display;
+
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: AppColors.textSecondary),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: AppColors.textSecondary),
+        ),
+      ],
     );
   }
 }

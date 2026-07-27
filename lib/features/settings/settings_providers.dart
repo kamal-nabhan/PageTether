@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase/supabase.dart' show PostgrestException;
 
+import '../../core/models/book.dart';
+import '../../core/models/collection.dart';
 import '../../core/models/sync_credentials.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/sync/sync_engine.dart';
@@ -127,36 +129,165 @@ class SyncRunError extends SyncRunState {
   final String message;
 }
 
-/// Orchestrates a full manual "Sync now": push this device's books +
-/// collections to Supabase, then pull the remote state and merge it back in
-/// (see `LibraryNotifier.mergeRemoteBooks`/
-/// `CollectionsNotifier.mergeRemoteCollections` for the last-write-wins
-/// merge itself). Deliberately sequential and one-shot — no automatic/
-/// background sync yet (that's Phase 4b).
+/// Subtle background-sync status (Phase 4b) — deliberately separate from
+/// [SyncRunState]: that one drives the manual "Sync now" button (progress
+/// text, a dismissible success/error banner) and must stay exactly as it
+/// was in Phase 4a, while this one is updated by *every* sync attempt
+/// (manual or automatic) and is meant to be glanced at, never blocking or
+/// dismissible — see the sidebar/Settings "Synced · just now" indicator.
+/// [AutoSyncFailed] in particular is intentionally quiet: background sync
+/// errors (offline, transient network blips) are simply retried on the next
+/// trigger, never surfaced as an alarming banner.
+sealed class AutoSyncStatus {
+  const AutoSyncStatus();
+}
+
+class AutoSyncIdle extends AutoSyncStatus {
+  const AutoSyncIdle();
+}
+
+class AutoSyncSyncing extends AutoSyncStatus {
+  const AutoSyncSyncing();
+}
+
+class AutoSyncSynced extends AutoSyncStatus {
+  const AutoSyncSynced(this.at);
+  final DateTime at;
+}
+
+class AutoSyncFailed extends AutoSyncStatus {
+  const AutoSyncFailed(this.message);
+  final String message;
+}
+
+class AutoSyncStatusNotifier extends Notifier<AutoSyncStatus> {
+  @override
+  AutoSyncStatus build() => const AutoSyncIdle();
+
+  void setSyncing() => state = const AutoSyncSyncing();
+  void setSynced() => state = AutoSyncSynced(DateTime.now());
+  void setFailed(String message) => state = AutoSyncFailed(message);
+}
+
+final autoSyncStatusProvider =
+    NotifierProvider<AutoSyncStatusNotifier, AutoSyncStatus>(
+      AutoSyncStatusNotifier.new,
+    );
+
+/// A short "just now"/"5m ago"/"2h ago" label for [AutoSyncSynced.at], used
+/// by the subtle sync-status indicator in the library sidebar and Settings.
+String formatSyncAge(DateTime at) {
+  final diff = DateTime.now().difference(at);
+  if (diff.inSeconds < 45) return 'just now';
+  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+  if (diff.inHours < 24) return '${diff.inHours}h ago';
+  return '${diff.inDays}d ago';
+}
+
+/// Orchestrates a full "Sync now": pull the remote state and merge it in
+/// (last-write-wins — see `LibraryNotifier.mergeRemoteBooks`/
+/// `CollectionsNotifier.mergeRemoteCollections`), THEN push this device's
+/// now-newest books + collections back. [syncNow] is the Phase 4a manual
+/// button; [autoSync] (Phase 4b) is the identical routine invoked silently
+/// by `library_screen.dart`'s become-ready/resume/debounced-change triggers.
+/// Both funnel through [_runExclusive]/[_performSync] below, so there is
+/// exactly one LWW-safe pull+merge-then-push implementation regardless of
+/// what triggered it.
 class SyncNotifier extends Notifier<SyncRunState> {
   @override
   SyncRunState build() => const SyncRunIdle();
 
-  Future<void> syncNow() async {
+  /// Non-null while a sync (manual or automatic) is running. Together with
+  /// [_dirty] this is the single-in-flight coalescing gate: a request that
+  /// arrives while [_inFlight] is already set never starts a second,
+  /// overlapping sync — it just marks [_dirty] and shares the same future.
+  Future<void>? _inFlight;
+
+  /// Set when a sync is requested while one is already [_inFlight] — makes
+  /// the running loop immediately run one more pass once it finishes,
+  /// instead of dropping the request that arrived mid-sync.
+  bool _dirty = false;
+
+  /// True whenever a sync — manual or automatic — is currently running.
+  /// `library_screen.dart` checks this before scheduling a *new* debounced
+  /// auto-sync in response to a `libraryProvider`/`collectionsProvider`
+  /// change: a change observed while a sync is already in flight is either
+  /// that very sync's own pull+merge landing (which must not re-trigger
+  /// itself — see the "no sync loop" requirement) or a genuine concurrent
+  /// edit that this in-flight sync's push will already pick up (it reads
+  /// book/collection state fresh, right before pushing).
+  bool get isSyncing => _inFlight != null;
+
+  /// User-triggered "Sync now" (Settings). Surfaces progress/result via
+  /// [state] exactly as in Phase 4a.
+  Future<void> syncNow() => _runExclusive(silent: false);
+
+  /// Every Phase 4b automatic trigger (on becoming ready, on app
+  /// resume/desktop focus, debounced after a local change) calls this. Runs
+  /// the identical pull+merge-then-push routine but never touches [state]
+  /// — so it can never pop up the manual button's error banner — and never
+  /// throws: failures are quietly recorded on [autoSyncStatusProvider] and
+  /// simply retried on the next trigger.
+  Future<void> autoSync() => _runExclusive(silent: true);
+
+  /// Coalesces concurrent sync requests into a single in-flight run — see
+  /// [isSyncing]'s doc. If a sync is already running, this marks it dirty
+  /// and returns that same in-flight future rather than starting a second,
+  /// overlapping one; [_runLoop] below then runs once more before settling.
+  Future<void> _runExclusive({required bool silent}) {
+    final existing = _inFlight;
+    if (existing != null) {
+      _dirty = true;
+      return existing;
+    }
+    final future = _runLoop(silent: silent);
+    _inFlight = future;
+    return future;
+  }
+
+  Future<void> _runLoop({required bool silent}) async {
+    try {
+      do {
+        _dirty = false;
+        await _performSync(silent: silent);
+      } while (_dirty);
+    } finally {
+      _inFlight = null;
+    }
+  }
+
+  /// The actual pull+merge-then-push routine, shared by every manual and
+  /// automatic trigger (always runs under [_runExclusive]'s exclusivity —
+  /// see that method's doc). When [silent] is true (every [autoSync] call),
+  /// [state] (the manual button's state machine) is never touched and no
+  /// exception ever escapes — only [autoSyncStatusProvider] reflects the
+  /// outcome.
+  Future<void> _performSync({required bool silent}) async {
     final credentials = ref.read(syncCredentialsProvider);
     if (!credentials.isConfigured) {
-      state = const SyncRunError(
-        'Add your Supabase URL and anon key below, then run schema.sql in '
-        'your Supabase project, before syncing.',
-      );
+      if (!silent) {
+        state = const SyncRunError(
+          'Add your Supabase URL and anon key below, then run schema.sql in '
+          'your Supabase project, before syncing.',
+        );
+      }
       return;
     }
 
     final userId = ref.read(authProvider.notifier).syncUserId;
     if (userId == null) {
-      state = const SyncRunError(
-        'Sign in to sync — connect your Google account first (from the '
-        'library sidebar/Drive menu).',
-      );
+      if (!silent) {
+        state = const SyncRunError(
+          'Sign in to sync — connect your Google account first (from the '
+          'library sidebar/Drive menu).',
+        );
+      }
       return;
     }
 
-    state = const SyncRunInProgress('Pulling remote changes…');
+    if (!silent) state = const SyncRunInProgress('Pulling remote changes…');
+    final autoStatus = ref.read(autoSyncStatusProvider.notifier);
+    autoStatus.setSyncing();
     final engine = SyncEngine(credentials);
     try {
       // Pull + merge BEFORE pushing. pushBooks/pushCollections upsert this
@@ -176,43 +307,59 @@ class SyncNotifier extends Notifier<SyncRunState> {
           .read(collectionsProvider.notifier)
           .mergeRemoteCollections(remoteCollections);
 
-      state = const SyncRunInProgress('Pushing local changes…');
+      if (!silent) state = const SyncRunInProgress('Pushing local changes…');
       final books = ref.read(libraryProvider);
       final collections = ref.read(collectionsProvider);
       await engine.pushBooks(userId, books);
       await engine.pushCollections(userId, collections);
 
-      final parts = <String>[
-        'Pushed ${books.length} book${books.length == 1 ? '' : 's'} and '
-            '${collections.length} collection${collections.length == 1 ? '' : 's'}.',
-      ];
-      if (bookMerge.added > 0 || bookMerge.updated > 0) {
-        parts.add(
-          '${bookMerge.added} new book${bookMerge.added == 1 ? '' : 's'}, '
-          '${bookMerge.updated} updated from another device.',
+      autoStatus.setSynced();
+      if (!silent) {
+        state = SyncRunSuccess(
+          _summarize(books, collections, bookMerge, collectionMerge),
         );
       }
-      if (collectionMerge.added > 0 || collectionMerge.updated > 0) {
-        parts.add(
-          '${collectionMerge.added} new collection'
-          '${collectionMerge.added == 1 ? '' : 's'}, '
-          '${collectionMerge.updated} updated from another device.',
-        );
-      }
-      if (bookMerge.added == 0 &&
-          bookMerge.updated == 0 &&
-          collectionMerge.added == 0 &&
-          collectionMerge.updated == 0) {
-        parts.add('Nothing new from other devices.');
-      }
-      state = SyncRunSuccess(parts.join(' '));
     } on PostgrestException catch (e) {
-      state = SyncRunError('Sync failed: ${e.message}');
+      autoStatus.setFailed(e.message);
+      if (!silent) state = SyncRunError('Sync failed: ${e.message}');
     } catch (e) {
-      state = SyncRunError('Sync failed: $e');
+      autoStatus.setFailed('$e');
+      if (!silent) state = SyncRunError('Sync failed: $e');
     } finally {
       await engine.dispose();
     }
+  }
+
+  String _summarize(
+    List<Book> books,
+    List<Collection> collections,
+    ({int added, int updated}) bookMerge,
+    ({int added, int updated}) collectionMerge,
+  ) {
+    final parts = <String>[
+      'Pushed ${books.length} book${books.length == 1 ? '' : 's'} and '
+          '${collections.length} collection${collections.length == 1 ? '' : 's'}.',
+    ];
+    if (bookMerge.added > 0 || bookMerge.updated > 0) {
+      parts.add(
+        '${bookMerge.added} new book${bookMerge.added == 1 ? '' : 's'}, '
+        '${bookMerge.updated} updated from another device.',
+      );
+    }
+    if (collectionMerge.added > 0 || collectionMerge.updated > 0) {
+      parts.add(
+        '${collectionMerge.added} new collection'
+        '${collectionMerge.added == 1 ? '' : 's'}, '
+        '${collectionMerge.updated} updated from another device.',
+      );
+    }
+    if (bookMerge.added == 0 &&
+        bookMerge.updated == 0 &&
+        collectionMerge.added == 0 &&
+        collectionMerge.updated == 0) {
+      parts.add('Nothing new from other devices.');
+    }
+    return parts.join(' ');
   }
 
   void dismiss() => state = const SyncRunIdle();

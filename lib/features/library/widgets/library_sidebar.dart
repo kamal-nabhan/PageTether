@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/collection.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../settings/settings_providers.dart';
 import '../../settings/settings_screen.dart';
 import '../library_providers.dart';
 import 'collection_prompts.dart';
@@ -120,6 +121,7 @@ class LibrarySidebar extends ConsumerWidget {
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: DriveUploadButton(),
             ),
+            const _AutoSyncStatusRow(),
             const SizedBox(height: 16),
             const Divider(height: 1),
             Expanded(
@@ -363,3 +365,44 @@ class _CollectionNavItem extends StatelessWidget {
 }
 
 enum _CollectionAction { rename, delete }
+
+/// Subtle Phase 4b background-sync indicator — see `AutoSyncStatus`'s class
+/// doc. Hidden entirely when idle (nothing configured/attempted yet) so it
+/// never competes with [DriveAuthPanel] for attention; otherwise a small,
+/// non-interactive one-line status directly beneath the Drive controls.
+class _AutoSyncStatusRow extends ConsumerWidget {
+  const _AutoSyncStatusRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(autoSyncStatusProvider);
+    final (IconData, String)? display = switch (status) {
+      AutoSyncIdle() => null,
+      AutoSyncSyncing() => (Icons.sync_rounded, 'Syncing…'),
+      AutoSyncSynced(:final at) => (
+        Icons.cloud_done_rounded,
+        'Synced · ${formatSyncAge(at)}',
+      ),
+      AutoSyncFailed() => (Icons.cloud_off_rounded, 'Sync paused · will retry'),
+    };
+    if (display == null) return const SizedBox.shrink();
+    final (icon, label) = display;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Row(
+        children: [
+          Icon(icon, size: 13, color: AppColors.textSecondary),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

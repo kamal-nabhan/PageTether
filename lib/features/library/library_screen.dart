@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +11,7 @@ import '../../core/services/window/window_focus_service.dart'
     as window_focus;
 import '../../core/theme/app_theme.dart';
 import '../reader/reader_screen.dart';
+import '../settings/settings_providers.dart';
 import '../settings/settings_screen.dart';
 import 'library_providers.dart';
 import 'widgets/add_to_collection_dialog.dart';
@@ -40,7 +43,9 @@ class LibraryScreen extends ConsumerStatefulWidget {
 /// screen can observe app lifecycle transitions via [WidgetsBindingObserver]
 /// — see [didChangeAppLifecycleState] — to auto-refresh the Drive library
 /// when the app comes back to the foreground (covers another device having
-/// added/removed a file while this one was backgrounded).
+/// added/removed a file while this one was backgrounded). Since Phase 4b,
+/// the same resume/focus signal also (independently) kicks off a background
+/// Supabase sync — see [_onPossibleForegroundReturn].
 ///
 /// Desktop windows often don't emit `AppLifecycleState.resumed` just from
 /// regaining OS focus (e.g. alt-tabbing back in without minimizing first),
@@ -48,8 +53,10 @@ class LibraryScreen extends ConsumerStatefulWidget {
 /// supplemented with a `window_manager` focus listener (see
 /// [window_focus]/`window_focus_service.dart`) that's a no-op on
 /// mobile/web, where the lifecycle observer already covers it. Both paths
-/// funnel through the same debounced [_maybeAutoRefreshFromDrive], so they
-/// never stack duplicate `files.list` calls.
+/// funnel through the same [_onPossibleForegroundReturn], which dispatches
+/// to the independently-debounced [_maybeAutoRefreshFromDrive] and
+/// [_maybeAutoSyncOnResume], so neither ever stacks duplicate `files.list`
+/// or sync calls.
 class _LibraryScreenState extends ConsumerState<LibraryScreen>
     with WidgetsBindingObserver {
   /// Minimum gap between auto-refreshes triggered by resuming/refocusing —
@@ -58,14 +65,27 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
   /// `files.list` calls for no benefit.
   static const _autoRefreshDebounce = Duration(seconds: 30);
 
+  /// Same idea as [_autoRefreshDebounce] but tracked separately for the
+  /// Phase 4b resume/focus sync trigger: sync-readiness (Supabase configured
+  /// + signed in to Google) is independent of Drive-access readiness, so the
+  /// two triggers can fire on different schedules.
+  static const _autoSyncResumeDebounce = Duration(seconds: 30);
+
+  /// Debounce for auto-sync-on-local-change (Phase 4b): coalesces a burst of
+  /// edits (e.g. flipping through pages, several favorite toggles) into one
+  /// sync a few seconds after the *last* one, rather than a sync per edit.
+  static const _autoSyncPushDebounce = Duration(seconds: 5);
+
   DateTime? _lastAutoRefresh;
+  DateTime? _lastAutoSyncResume;
+  Timer? _autoSyncDebounceTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     window_focus.registerDesktopWindowFocusListener(
-      _maybeAutoRefreshFromDrive,
+      _onPossibleForegroundReturn,
     );
   }
 
@@ -73,6 +93,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     window_focus.unregisterDesktopWindowFocusListener();
+    _autoSyncDebounceTimer?.cancel();
     super.dispose();
   }
 
@@ -84,7 +105,17 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     // one check covers both "auto-refresh on resume" and "on web
     // visibility" without platform-specific code.
     if (state != AppLifecycleState.resumed) return;
+    _onPossibleForegroundReturn();
+  }
+
+  /// Fired on both a real app resume ([didChangeAppLifecycleState]) and a
+  /// desktop window regaining OS focus (the `window_focus` listener
+  /// registered in [initState]) — see the class doc for why both paths
+  /// exist. Runs the (independently debounced/gated) Drive refresh and
+  /// Phase 4b sync triggers side by side so neither blocks the other.
+  void _onPossibleForegroundReturn() {
     _maybeAutoRefreshFromDrive();
+    _maybeAutoSyncOnResume();
   }
 
   void _maybeAutoRefreshFromDrive() {
@@ -97,6 +128,51 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     if (last != null && now.difference(last) < _autoRefreshDebounce) return;
     _lastAutoRefresh = now;
     ref.read(libraryProvider.notifier).hydrateFromDrive();
+  }
+
+  /// Whether Phase 4b auto-sync is allowed to run at all right now: a
+  /// Supabase project is configured *and* the user is signed in to Google
+  /// (see `AuthStateSignedIn.canSync`) — the same gate `SyncNotifier`
+  /// itself re-checks before doing any network work, kept here too so
+  /// callers can skip even scheduling a debounce timer when it's pointless.
+  bool _canAutoSync() {
+    final credentials = ref.read(syncCredentialsProvider);
+    final authState = ref.read(authProvider);
+    final canSync = authState is AuthStateSignedIn && authState.canSync;
+    return credentials.isConfigured && canSync;
+  }
+
+  /// Resume/focus auto-sync trigger (Phase 4b, trigger #2) — debounced
+  /// independently of [_maybeAutoRefreshFromDrive] (see
+  /// [_autoSyncResumeDebounce]'s doc).
+  void _maybeAutoSyncOnResume() {
+    if (!mounted || !_canAutoSync()) return;
+    final now = DateTime.now();
+    final last = _lastAutoSyncResume;
+    if (last != null && now.difference(last) < _autoSyncResumeDebounce) {
+      return;
+    }
+    _lastAutoSyncResume = now;
+    ref.read(syncRunProvider.notifier).autoSync();
+  }
+
+  /// Debounced auto-push trigger (Phase 4b, trigger #3) — scheduled by the
+  /// `libraryProvider`/`collectionsProvider` listeners in [build] whenever
+  /// either changes (reading progress, favorite toggle, collection
+  /// add/remove/rename/create/delete, a rename, etc). Skips scheduling
+  /// entirely while a sync is already running (`SyncNotifier.isSyncing`) —
+  /// that covers both a change that's actually this sync's own pull+merge
+  /// landing (see `SyncNotifier.isSyncing`'s doc for why that can't be
+  /// allowed to re-trigger itself) and a genuine concurrent edit, which the
+  /// in-flight sync's push will already pick up.
+  void _scheduleDebouncedAutoSync() {
+    if (!mounted || !_canAutoSync()) return;
+    if (ref.read(syncRunProvider.notifier).isSyncing) return;
+    _autoSyncDebounceTimer?.cancel();
+    _autoSyncDebounceTimer = Timer(_autoSyncPushDebounce, () {
+      if (!mounted) return;
+      ref.read(syncRunProvider.notifier).autoSync();
+    });
   }
 
   Future<void> _openPdf(BuildContext context, WidgetRef ref) async {
@@ -260,12 +336,45 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     // automatically on launch — only once the user actually connects, per
     // the Phase 2 plan), by watching for the moment `hasDriveAccess` first
     // becomes true.
+    //
+    // Also the Phase 4b "on becoming ready" auto-sync trigger (#1): the
+    // moment `canSync` (Supabase configured + signed in to Google) first
+    // becomes true — right after connecting *either* half, whichever
+    // happens second — kick off one sync immediately rather than waiting
+    // for the next resume/local-change trigger.
     ref.listen<AuthState>(authProvider, (previous, next) {
       final wasReady = previous is AuthStateSignedIn && previous.hasDriveAccess;
       final isReady = next is AuthStateSignedIn && next.hasDriveAccess;
       if (isReady && !wasReady) {
         ref.read(libraryProvider.notifier).hydrateFromDrive();
       }
+
+      final couldSyncBefore = previous is AuthStateSignedIn && previous.canSync;
+      final canSyncNow = next is AuthStateSignedIn && next.canSync;
+      if (canSyncNow && !couldSyncBefore && _canAutoSync()) {
+        ref.read(syncRunProvider.notifier).autoSync();
+      }
+    });
+
+    // The other half of trigger #1: saving Supabase credentials while
+    // already signed in to Google.
+    ref.listen(syncCredentialsProvider, (previous, next) {
+      final wasConfigured = previous?.isConfigured ?? false;
+      if (next.isConfigured && !wasConfigured && _canAutoSync()) {
+        ref.read(syncRunProvider.notifier).autoSync();
+      }
+    });
+
+    // Trigger #3: debounced auto-push after a local syncable change —
+    // reading progress, favorite toggle, collection membership, a rename,
+    // or (via `collectionsProvider`) a collection create/rename/delete. See
+    // `_scheduleDebouncedAutoSync`'s doc for the in-flight-sync guard that
+    // keeps this from ever re-triggering off its own pull+merge.
+    ref.listen(libraryProvider, (previous, next) {
+      _scheduleDebouncedAutoSync();
+    });
+    ref.listen(collectionsProvider, (previous, next) {
+      _scheduleDebouncedAutoSync();
     });
 
     return LayoutBuilder(
