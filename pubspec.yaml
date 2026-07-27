@@ -57,6 +57,13 @@ dependencies:
   url_launcher: ^6.3.2
   path_provider: ^2.1.6
 
+  # --- Phase 4a: BYOD Supabase sync foundation ---
+  # The bare `supabase` Dart client (NOT `supabase_flutter`), since BYOD means
+  # the URL + anon key are pasted by the user at runtime and the client must
+  # be built dynamically (`SupabaseClient(url, anonKey)`) rather than via
+  # `supabase_flutter`'s compile-time `Supabase.initialize` singleton.
+  supabase: ^2.14.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

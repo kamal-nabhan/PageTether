@@ -7,6 +7,7 @@ import 'core/services/fullscreen/fullscreen_service.dart';
 import 'core/storage/library_store.dart';
 import 'features/library/library_bootstrap.dart';
 import 'features/library/library_providers.dart';
+import 'features/settings/settings_providers.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,6 +22,7 @@ Future<void> main() async {
   final initialBooks = await loadInitialLibrary(store);
   final initialCollections = await store.loadCollections();
   final initialViewMode = await store.loadViewMode();
+  final initialSyncCredentials = await store.loadSyncCredentials();
 
   runApp(
     ProviderScope(
@@ -31,6 +33,9 @@ Future<void> main() async {
           () => CollectionsNotifier(initialCollections),
         ),
         viewModeProvider.overrideWith(() => ViewModeNotifier(initialViewMode)),
+        syncCredentialsProvider.overrideWith(
+          () => SyncCredentialsNotifier(initialSyncCredentials),
+        ),
       ],
       child: const PageTetherApp(),
     ),

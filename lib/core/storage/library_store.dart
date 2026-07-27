@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/collection.dart';
 import '../models/library_view_mode.dart';
+import '../models/sync_credentials.dart';
 
 /// Local persistence for the library's book metadata and user-defined
 /// collections.
@@ -24,6 +25,13 @@ class LibraryStore {
   static const _key = 'pt.library.v1';
   static const _collectionsKey = 'pt.collections.v1';
   static const _viewModeKey = 'pt.viewmode.v1';
+  // Phase 4a: BYOD Supabase URL + anon key, pasted by the user in Settings.
+  // The anon key is user-provided and local-only — never bundled/committed —
+  // same trust model as `credentials.json`/the desktop Drive token cache
+  // (see `.gitignore` and `core/services/auth/desktop_drive_auth_io.dart`),
+  // just persisted in shared_preferences instead of a file since it's
+  // small and user-editable rather than an opaque OAuth blob.
+  static const _syncCredentialsKey = 'pt.sync.credentials.v1';
 
   final SharedPreferences _prefs;
 
@@ -98,6 +106,36 @@ class LibraryStore {
   /// Persists the user's chosen library view mode.
   Future<void> saveViewMode(LibraryViewMode mode) async {
     await _prefs.setString(_viewModeKey, mode.name);
+  }
+
+  /// Loads the user's pasted-in Supabase URL/anon key, or
+  /// [SyncCredentials.empty] if nothing has been saved (or Settings was used
+  /// to disconnect — see [clearSyncCredentials]).
+  Future<SyncCredentials> loadSyncCredentials() async {
+    final raw = _prefs.getString(_syncCredentialsKey);
+    if (raw == null || raw.isEmpty) return SyncCredentials.empty;
+    try {
+      return SyncCredentials.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return SyncCredentials.empty;
+    }
+  }
+
+  /// Persists [credentials] as-is (no validation — see
+  /// `SyncEngine.testConnection` for that).
+  Future<void> saveSyncCredentials(SyncCredentials credentials) async {
+    await _prefs.setString(
+      _syncCredentialsKey,
+      jsonEncode(credentials.toJson()),
+    );
+  }
+
+  /// "Disconnect": forgets the locally-stored Supabase credentials. Does
+  /// not touch anything on the Supabase project itself.
+  Future<void> clearSyncCredentials() async {
+    await _prefs.remove(_syncCredentialsKey);
   }
 
   Map<String, dynamic> _readMap() {

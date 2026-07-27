@@ -21,6 +21,7 @@ import '../../core/pdf/pdf_source.dart';
 import '../../core/services/auth/auth_exceptions.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/drive/drive_service.dart';
+import '../../core/services/sync/sync_engine.dart';
 import '../../core/storage/library_store.dart';
 import '../../core/storage/pdf_hash.dart';
 import '../../core/theme/app_theme.dart';
@@ -266,12 +267,18 @@ class LibraryNotifier extends Notifier<List<Book>> {
     final existingIndex = state.indexWhere((b) => b.id == id);
     final Book book;
     if (existingIndex != -1) {
-      book = state[existingIndex].copyWith(
-        pageCount: pageCount > 0 ? pageCount : state[existingIndex].pageCount,
+      final existing = state[existingIndex];
+      final resolvedPageCount = pageCount > 0 ? pageCount : existing.pageCount;
+      book = existing.copyWith(
+        pageCount: resolvedPageCount,
         filePath: path,
         fileBytes: bytes,
         openedOnWeb: path == null,
         lastOpenedAt: DateTime.now(),
+        // Only a genuine syncable-metadata change (page count, here) bumps
+        // the sync clock — re-opening the same file with no new page count
+        // shouldn't make every "Sync now" think this book just changed.
+        updatedAt: resolvedPageCount != existing.pageCount ? DateTime.now() : null,
       );
     } else {
       book = Book(
@@ -312,10 +319,12 @@ class LibraryNotifier extends Notifier<List<Book>> {
       return;
     }
 
+    final now = DateTime.now();
     final updated = existing.copyWith(
       currentPage: currentPage,
       pageCount: resolvedPageCount,
-      lastOpenedAt: DateTime.now(),
+      lastOpenedAt: now,
+      updatedAt: now,
     );
     state = [for (final b in state) if (b.id == bookId) updated else b];
     unawaited(_store.upsert(updated));
@@ -497,9 +506,13 @@ class LibraryNotifier extends Notifier<List<Book>> {
           // Only refresh the Drive-side metadata (name/size) — preserve any
           // locally-cached file path and reading progress we already knew
           // about from a previous session.
+          final refreshedTitle = _titleFromFileName(file.name);
           updatedBooks[existing.id] = existing.copyWith(
-            title: _titleFromFileName(file.name),
+            title: refreshedTitle,
             driveSizeBytes: file.sizeBytes,
+            // Only bump the sync clock on an actual rename — a size-only
+            // refresh isn't syncable metadata changing.
+            updatedAt: refreshedTitle != existing.title ? DateTime.now() : null,
           );
         } else {
           final incoming = _driveBookFromMeta(file);
@@ -603,6 +616,8 @@ class LibraryNotifier extends Notifier<List<Book>> {
           source: BookSource.drive,
           driveFileId: meta.id,
           driveSizeBytes: meta.sizeBytes,
+          // Gaining a `driveFileId` is a genuine syncable-metadata change.
+          updatedAt: DateTime.now(),
         );
       } else {
         book = Book(
@@ -678,12 +693,14 @@ class LibraryNotifier extends Notifier<List<Book>> {
         onProgress: progressNotifier.set,
       );
       final pageCount = await readPdfPageCount(source);
+      final resolvedPageCount = pageCount > 0 ? pageCount : book.pageCount;
 
       final updated = book.copyWith(
-        pageCount: pageCount > 0 ? pageCount : book.pageCount,
+        pageCount: resolvedPageCount,
         filePath: source.path,
         fileBytes: source.bytes,
         lastOpenedAt: DateTime.now(),
+        updatedAt: resolvedPageCount != book.pageCount ? DateTime.now() : null,
       );
       state = [for (final b in state) if (b.id == bookId) updated else b];
       unawaited(_store.upsert(updated));
@@ -764,7 +781,10 @@ class LibraryNotifier extends Notifier<List<Book>> {
   void toggleFavorite(String bookId) {
     final index = state.indexWhere((b) => b.id == bookId);
     if (index == -1) return;
-    final updated = state[index].copyWith(isFavorite: !state[index].isFavorite);
+    final updated = state[index].copyWith(
+      isFavorite: !state[index].isFavorite,
+      updatedAt: DateTime.now(),
+    );
     state = [for (final b in state) if (b.id == bookId) updated else b];
     unawaited(_store.upsert(updated));
   }
@@ -778,6 +798,7 @@ class LibraryNotifier extends Notifier<List<Book>> {
     if (existing.collectionIds.contains(collectionId)) return;
     final updated = existing.copyWith(
       collectionIds: {...existing.collectionIds, collectionId},
+      updatedAt: DateTime.now(),
     );
     state = [for (final b in state) if (b.id == bookId) updated else b];
     unawaited(_store.upsert(updated));
@@ -792,6 +813,7 @@ class LibraryNotifier extends Notifier<List<Book>> {
     if (!existing.collectionIds.contains(collectionId)) return;
     final updated = existing.copyWith(
       collectionIds: {...existing.collectionIds}..remove(collectionId),
+      updatedAt: DateTime.now(),
     );
     state = [for (final b in state) if (b.id == bookId) updated else b];
     unawaited(_store.upsert(updated));
@@ -801,10 +823,14 @@ class LibraryNotifier extends Notifier<List<Book>> {
   /// the collection itself is deleted (see `CollectionsNotifier.delete`) so
   /// no book is left pointing at a now-nonexistent collection id.
   void removeCollectionFromAllBooks(String collectionId) {
+    final now = DateTime.now();
     final toUpdate = [
       for (final b in state)
         if (b.collectionIds.contains(collectionId))
-          b.copyWith(collectionIds: {...b.collectionIds}..remove(collectionId)),
+          b.copyWith(
+            collectionIds: {...b.collectionIds}..remove(collectionId),
+            updatedAt: now,
+          ),
     ];
     if (toUpdate.isEmpty) return;
     final byId = {for (final b in toUpdate) b.id: b};
@@ -821,9 +847,83 @@ class LibraryNotifier extends Notifier<List<Book>> {
     if (title == null && author == null) return;
     final index = state.indexWhere((b) => b.id == bookId);
     if (index == -1) return;
-    final updated = state[index].copyWith(title: title, author: author);
+    final updated = state[index].copyWith(
+      title: title,
+      author: author,
+      updatedAt: DateTime.now(),
+    );
     state = [for (final b in state) if (b.id == bookId) updated else b];
     unawaited(_store.upsert(updated));
+  }
+
+  /// Merges [remoteBooks] (pulled from Supabase via `SyncEngine.pullBooks`)
+  /// into the local library — the pull+merge step of a manual "Sync now" (see
+  /// `SyncNotifier.syncNow` in `features/settings/settings_providers.dart`),
+  /// which runs BEFORE this device pushes its (now already-merged, newest)
+  /// state back via `SyncEngine.pushBooks`, so a stale push can't clobber a
+  /// newer device's remote values.
+  ///
+  /// **Last-write-wins by `updated_at`**: a book known both locally and
+  /// remotely only has its progress/favorite/metadata/collection membership
+  /// overwritten if [SyncedBook.updatedAt] is strictly newer than the local
+  /// [Book.updatedAt] — otherwise this device's copy is already at least as
+  /// current (including the common case where *this* device just pushed
+  /// that exact state moments ago) and is left untouched. A book that only
+  /// exists remotely is added fresh: with a `driveFileId` it naturally shows
+  /// "Download & Read" ([Book.isDriveBook] + no [Book.hasLiveSource] is
+  /// already handled by `LibraryScreen._openBook`); without one, it's added
+  /// as a synced-metadata-only local entry — no live source until the user
+  /// re-selects the same file, which resolves to the same content-hash [id]
+  /// and merges in place exactly like any other `openLocalPdf` re-pick.
+  ///
+  /// Returns how many books were added vs. updated, for the sync summary.
+  ({int added, int updated}) mergeRemoteBooks(List<SyncedBook> remoteBooks) {
+    var added = 0;
+    var updated = 0;
+    final byId = {for (final b in state) b.id: b};
+
+    for (final remote in remoteBooks) {
+      final local = byId[remote.bookId];
+      if (local == null) {
+        byId[remote.bookId] = Book(
+          id: remote.bookId,
+          title: remote.title,
+          author: remote.author,
+          pageCount: remote.pageCount,
+          currentPage: remote.currentPage,
+          coverGradientIndex:
+              remote.bookId.hashCode.abs() % kCoverGradients.length,
+          lastOpenedAt: remote.updatedAt,
+          source: remote.driveFileId != null
+              ? BookSource.drive
+              : BookSource.local,
+          driveFileId: remote.driveFileId,
+          isFavorite: remote.isFavorite,
+          collectionIds: remote.collectionIds,
+          updatedAt: remote.updatedAt,
+        );
+        added++;
+        continue;
+      }
+      if (!remote.updatedAt.isAfter(local.updatedAt)) continue;
+      byId[remote.bookId] = local.copyWith(
+        title: remote.title,
+        author: remote.author,
+        currentPage: remote.currentPage,
+        pageCount: remote.pageCount,
+        isFavorite: remote.isFavorite,
+        collectionIds: remote.collectionIds,
+        driveFileId: remote.driveFileId,
+        updatedAt: remote.updatedAt,
+      );
+      updated++;
+    }
+
+    if (added == 0 && updated == 0) return (added: 0, updated: 0);
+    state = byId.values.toList()
+      ..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
+    unawaited(_store.saveAll(state));
+    return (added: added, updated: updated);
   }
 
   DriveTransferProgressNotifier get progressNotifier =>
@@ -894,7 +994,10 @@ class CollectionsNotifier extends Notifier<List<Collection>> {
     if (trimmed.isEmpty) return;
     final index = state.indexWhere((c) => c.id == id);
     if (index == -1) return;
-    final updated = state[index].copyWith(name: trimmed);
+    final updated = state[index].copyWith(
+      name: trimmed,
+      updatedAt: DateTime.now(),
+    );
     state = [for (final c in state) if (c.id == id) updated else c];
     unawaited(_store.saveCollections(state));
   }
@@ -907,6 +1010,46 @@ class CollectionsNotifier extends Notifier<List<Collection>> {
     state = [for (final c in state) if (c.id != id) c];
     unawaited(_store.saveCollections(state));
     ref.read(libraryProvider.notifier).removeCollectionFromAllBooks(id);
+  }
+
+  /// Merges [remoteCollections] (pulled from Supabase via
+  /// `SyncEngine.pullCollections`) into the local collection list — the
+  /// collections half of "Sync now", mirroring
+  /// `LibraryNotifier.mergeRemoteBooks`'s last-write-wins-by-`updated_at`
+  /// rule and its "add if unknown, overwrite only if strictly newer"
+  /// behavior. Returns how many collections were added vs. updated.
+  ({int added, int updated}) mergeRemoteCollections(
+    List<SyncedCollection> remoteCollections,
+  ) {
+    var added = 0;
+    var updated = 0;
+    final byId = {for (final c in state) c.id: c};
+
+    for (final remote in remoteCollections) {
+      final local = byId[remote.id];
+      if (local == null) {
+        byId[remote.id] = Collection(
+          id: remote.id,
+          name: remote.name,
+          colorIndex: remote.colorIndex,
+          updatedAt: remote.updatedAt,
+        );
+        added++;
+        continue;
+      }
+      if (!remote.updatedAt.isAfter(local.updatedAt)) continue;
+      byId[remote.id] = local.copyWith(
+        name: remote.name,
+        colorIndex: remote.colorIndex,
+        updatedAt: remote.updatedAt,
+      );
+      updated++;
+    }
+
+    if (added == 0 && updated == 0) return (added: 0, updated: 0);
+    state = byId.values.toList();
+    unawaited(_store.saveCollections(state));
+    return (added: added, updated: updated);
   }
 }
 

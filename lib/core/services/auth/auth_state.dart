@@ -34,35 +34,56 @@ class AuthStateSigningIn extends AuthState {
 /// Signed in to a Google account. [hasDriveAccess] is false only on the
 /// web two-step flow, between "signed in to Google" and "granted the
 /// drive.file scope" — see `web_signin_button_web.dart` for why those are
-/// separate steps on web. [email]/[displayName]/[photoUrl] are only
-/// available on web/mobile (via `google_sign_in`'s basic profile); desktop's
-/// googleapis_auth loopback flow deliberately requests only `drive.file`
-/// (no `openid`/`email` scope), so those are null there — the UI just shows
-/// a generic "Connected" badge in that case.
+/// separate steps on web. [email]/[displayName]/[photoUrl] are available on
+/// web/mobile via `google_sign_in`'s basic profile; on desktop, [email] is
+/// populated once the loopback flow's `openid`/`userinfo.email` scopes
+/// resolve an identity (see `desktop_drive_auth_io.dart`) and stays null
+/// otherwise (e.g. a session cached before that scope existed) — desktop
+/// never has [displayName]/[photoUrl], since only the email scope is
+/// requested there.
+///
+/// [syncUserId]/[syncEmail] are the identity Phase 4's Supabase sync keys
+/// rows by — set together with [email] and non-null exactly when sync is
+/// available. [syncUserId] prefers Google's stable `sub`/account id (the
+/// `GoogleSignInAccount.id` on web/mobile, the userinfo `sub` on desktop),
+/// falling back to [syncEmail] if only the email could be resolved.
 class AuthStateSignedIn extends AuthState {
   const AuthStateSignedIn({
     required this.hasDriveAccess,
     this.email,
     this.displayName,
     this.photoUrl,
+    this.syncUserId,
   });
 
   final bool hasDriveAccess;
   final String? email;
   final String? displayName;
   final String? photoUrl;
+  final String? syncUserId;
+
+  /// Alias for [email] under the name Phase 4's sync code reasons about —
+  /// currently always the same value, but kept distinct so call sites that
+  /// care about "is sync identity available" read that way rather than
+  /// implicitly reusing the Drive-account-chip field.
+  String? get syncEmail => email;
+
+  /// True once both halves of a usable sync identity are known.
+  bool get canSync => syncUserId != null;
 
   AuthStateSignedIn copyWith({
     bool? hasDriveAccess,
     String? email,
     String? displayName,
     String? photoUrl,
+    String? syncUserId,
   }) {
     return AuthStateSignedIn(
       hasDriveAccess: hasDriveAccess ?? this.hasDriveAccess,
       email: email ?? this.email,
       displayName: displayName ?? this.displayName,
       photoUrl: photoUrl ?? this.photoUrl,
+      syncUserId: syncUserId ?? this.syncUserId,
     );
   }
 }

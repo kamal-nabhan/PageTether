@@ -28,8 +28,11 @@ import 'google_identity_auth.dart';
 ///   calling [signIn] directly. Unbuilt/unverified in this phase (no
 ///   Android SDK/Mac available) but wired for correctness.
 ///
-/// Every branch requests only [kDriveFileScope] scope
-/// (`drive.file` — see `drive_scopes.dart`).
+/// Every branch requests [kDriveFileScope] (`drive.file` — see
+/// `drive_scopes.dart`); desktop additionally requests the `openid`/
+/// `userinfo.email` scopes so it can resolve a sync identity (see
+/// [syncUserId]) the same way web/mobile already get one for free from
+/// `google_sign_in`'s basic profile.
 class AuthNotifier extends Notifier<AuthState> {
   StreamSubscription<GoogleSignInAuthenticationEvent>? _eventsSub;
 
@@ -55,7 +58,18 @@ class AuthNotifier extends Notifier<AuthState> {
       unawaited(_eventsSub?.cancel());
       _desktopClient?.close();
     });
-    unawaited(_bootstrap());
+    // Deferred via `Future.microtask` rather than called directly: when
+    // there's no `GOOGLE_WEB_CLIENT_ID` (e.g. `flutter test`, or a build
+    // that simply omitted the dart-define), `_bootstrapWebOrMobile`'s
+    // early-return branch below sets `state` with *no* `await` in between —
+    // calling it synchronously here would run that whole branch before this
+    // `build()` call has even returned its own value, and Riverpod then
+    // clobbers that state assignment with `build()`'s return value right
+    // after, leaving the notifier stuck on `AuthStateInitializing` forever
+    // (a permanent spinner). Scheduling as a microtask guarantees this
+    // always runs strictly after `build()` has returned, regardless of
+    // whether the bootstrap path below happens to await anything.
+    unawaited(Future.microtask(_bootstrap));
     return const AuthStateInitializing();
   }
 
@@ -81,13 +95,17 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> _bootstrapDesktop() async {
     try {
-      final client = await desktop.desktopRestoreSession();
-      if (client == null) {
+      final session = await desktop.desktopRestoreSession();
+      if (session == null) {
         state = const AuthStateSignedOut();
         return;
       }
-      _desktopClient = client;
-      state = const AuthStateSignedIn(hasDriveAccess: true);
+      _desktopClient = session.client;
+      state = AuthStateSignedIn(
+        hasDriveAccess: true,
+        email: session.identity?.email,
+        syncUserId: session.identity?.id ?? session.identity?.email,
+      );
     } on DriveAuthUnavailableException catch (e) {
       state = AuthStateUnavailable(e.reason);
     } catch (_) {
@@ -151,6 +169,7 @@ class AuthNotifier extends Notifier<AuthState> {
           email: user.email,
           displayName: user.displayName,
           photoUrl: user.photoUrl,
+          syncUserId: user.id,
         );
       case GoogleSignInAuthenticationEventSignOut():
         _account = null;
@@ -174,13 +193,17 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> _signInDesktop() async {
     state = const AuthStateSigningIn();
     try {
-      final client = await desktop.desktopSignIn(
+      final session = await desktop.desktopSignIn(
         onConsentUrl: (url) {
           unawaited(launchUrl(url, mode: LaunchMode.externalApplication));
         },
       );
-      _desktopClient = client;
-      state = const AuthStateSignedIn(hasDriveAccess: true);
+      _desktopClient = session.client;
+      state = AuthStateSignedIn(
+        hasDriveAccess: true,
+        email: session.identity?.email,
+        syncUserId: session.identity?.id ?? session.identity?.email,
+      );
     } on DriveAuthUnavailableException catch (e) {
       state = AuthStateUnavailable(e.reason);
     } catch (e) {
@@ -204,6 +227,7 @@ class AuthNotifier extends Notifier<AuthState> {
         email: account.email,
         displayName: account.displayName,
         photoUrl: account.photoUrl,
+        syncUserId: account.id,
       );
     } catch (e) {
       state = AuthStateError('Could not connect to Google Drive: $e');
@@ -268,6 +292,22 @@ class AuthNotifier extends Notifier<AuthState> {
     // `GoogleIdentityAuth.authorizeDriveAccess` for why.
     return GoogleIdentityAuth.instance.authorizeDriveAccess(account);
   }
+
+  /// The stable identity Phase 4's `SyncEngine` keys Supabase rows by (see
+  /// `AuthStateSignedIn.syncUserId`), or null when not signed in to Google
+  /// or no sync identity could be resolved yet — either way, sync-related
+  /// UI should fall back to a "sign in to sync" prompt rather than crash.
+  String? get syncUserId =>
+      switch (state) { AuthStateSignedIn(:final syncUserId) => syncUserId, _ => null };
+
+  /// The Google account email backing [syncUserId], for display purposes
+  /// (e.g. "Syncing as you@example.com" in Settings).
+  String? get syncEmail =>
+      switch (state) { AuthStateSignedIn(:final syncEmail) => syncEmail, _ => null };
+
+  /// True once [syncUserId] is available — the gate `SyncEngine`-facing UI
+  /// should check before offering "Sync now".
+  bool get canSync => syncUserId != null;
 }
 
 final authProvider = NotifierProvider<AuthNotifier, AuthState>(

@@ -9,6 +9,7 @@ import '../../core/services/window/window_focus_service.dart'
     as window_focus;
 import '../../core/theme/app_theme.dart';
 import '../reader/reader_screen.dart';
+import '../settings/settings_screen.dart';
 import 'library_providers.dart';
 import 'widgets/add_to_collection_dialog.dart';
 import 'widgets/book_card.dart';
@@ -174,6 +175,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
     showRenameBookDialog(context, ref, book);
   }
 
+  void _openSettings(BuildContext context) {
+    Navigator.of(
+      context,
+    ).push<void>(MaterialPageRoute(builder: (_) => const SettingsScreen()));
+  }
+
   void _openDriveSheet(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
@@ -307,6 +314,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen>
           appBar: AppBar(
             title: const Text('PageTether'),
             actions: [
+              IconButton(
+                tooltip: 'Settings',
+                icon: const Icon(Icons.settings_outlined),
+                onPressed: () => _openSettings(context),
+              ),
               IconButton(
                 tooltip: 'Google Drive',
                 icon: const Icon(Icons.add_to_drive_rounded),

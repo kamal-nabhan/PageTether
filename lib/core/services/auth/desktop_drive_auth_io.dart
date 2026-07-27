@@ -8,6 +8,7 @@
 // `googleapis_auth`'s `clientViaUserConsent`, using the **Desktop app**
 // OAuth client exported from Google Cloud Console into `credentials.json`
 // at the project root (gitignored — never commit it).
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -20,6 +21,39 @@ import 'auth_exceptions.dart';
 import 'drive_scopes.dart';
 
 const _tokenFileName = 'drive_token.json';
+const _identityFileName = 'drive_identity.json';
+
+/// Minimal sync identity resolved from Google's OIDC userinfo endpoint (see
+/// [_fetchIdentity]) once the desktop loopback flow also holds the
+/// `openid`/`userinfo.email` scopes (see `drive_scopes.dart`). [id] is the
+/// stable Google `sub` (subject) id — preferred as `AuthNotifier.syncUserId`
+/// — with [email] as the fallback identity key and the value shown to the
+/// user.
+class DesktopIdentity {
+  const DesktopIdentity({this.id, required this.email});
+
+  final String? id;
+  final String email;
+
+  Map<String, dynamic> toJson() => {'id': id, 'email': email};
+
+  factory DesktopIdentity.fromJson(Map<String, dynamic> json) =>
+      DesktopIdentity(id: json['id'] as String?, email: json['email'] as String);
+}
+
+/// Result of a successful desktop connect/restore: the Drive-authorized
+/// client plus whatever sync identity could be resolved alongside it.
+/// [identity] is null when the userinfo call failed or hasn't been attempted
+/// yet — notably true for a session cached *before* this feature shipped,
+/// whose access token only ever held `drive.file` — callers should treat a
+/// null [identity] as "Drive is connected but sync is not available", not as
+/// an error.
+class DesktopAuthSession {
+  const DesktopAuthSession({required this.client, this.identity});
+
+  final gapis_auth.AutoRefreshingAuthClient client;
+  final DesktopIdentity? identity;
+}
 
 /// Where the desktop OAuth token is cached: the OS-managed per-app support
 /// directory (e.g. `%APPDATA%\pagetether\` on Windows), resolved via
@@ -30,6 +64,52 @@ const _tokenFileName = 'drive_token.json';
 Future<File> _tokenCacheFile() async {
   final dir = await getApplicationSupportDirectory();
   return File('${dir.path}${Platform.pathSeparator}$_tokenFileName');
+}
+
+/// Sibling cache file to [_tokenCacheFile] holding the last-resolved
+/// [DesktopIdentity], so a silent [desktopRestoreSession] doesn't need a
+/// network round trip just to know the signed-in email/id.
+Future<File> _identityCacheFile() async {
+  final dir = await getApplicationSupportDirectory();
+  return File('${dir.path}${Platform.pathSeparator}$_identityFileName');
+}
+
+Future<DesktopIdentity?> _loadCachedIdentity() async {
+  try {
+    final file = await _identityCacheFile();
+    if (!await file.exists()) return null;
+    final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    return DesktopIdentity.fromJson(json);
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> _persistIdentity(DesktopIdentity identity) async {
+  final file = await _identityCacheFile();
+  await file.parent.create(recursive: true);
+  await file.writeAsString(jsonEncode(identity.toJson()));
+}
+
+/// Calls Google's OIDC userinfo endpoint through [client] (which attaches
+/// the bearer access token to every request it makes) to resolve the
+/// signed-in user's stable `sub` id and email. Returns null — never
+/// throws — if the call fails, most commonly because the authorized access
+/// token doesn't actually hold the `openid`/`userinfo.email` scopes (e.g. a
+/// token cached before this feature shipped).
+Future<DesktopIdentity?> _fetchIdentity(http.Client client) async {
+  try {
+    final response = await client.get(
+      Uri.parse('https://www.googleapis.com/oauth2/v3/userinfo'),
+    );
+    if (response.statusCode != 200) return null;
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    final email = json['email'] as String?;
+    if (email == null) return null;
+    return DesktopIdentity(id: json['sub'] as String?, email: email);
+  } catch (_) {
+    return null;
+  }
 }
 
 /// Looks for `credentials.json` next to the project root (the working
@@ -80,7 +160,13 @@ Future<gapis_auth.ClientId> _loadClientId() async {
 /// browser. Returns null (never throws) if there's no cache, it can't be
 /// read, or `credentials.json` is missing — callers fall back to
 /// [desktopSignIn] for an explicit connect.
-Future<gapis_auth.AutoRefreshingAuthClient?> desktopRestoreSession() async {
+///
+/// [DesktopAuthSession.identity] is loaded from the identity cache file if
+/// present; failing that, it's re-resolved with one userinfo call (see
+/// [_fetchIdentity]) and persisted for next time — this only ever fails
+/// silently (leaving `identity: null`) for a token cached before this
+/// feature shipped, whose scopes don't include `openid`/`userinfo.email`.
+Future<DesktopAuthSession?> desktopRestoreSession() async {
   try {
     final clientId = await _loadClientId();
     final cacheFile = await _tokenCacheFile();
@@ -95,7 +181,13 @@ Future<gapis_auth.AutoRefreshingAuthClient?> desktopRestoreSession() async {
       http.Client(),
     );
     _persistOnRefresh(client);
-    return client;
+
+    var identity = await _loadCachedIdentity();
+    if (identity == null) {
+      identity = await _fetchIdentity(client);
+      if (identity != null) unawaited(_persistIdentity(identity));
+    }
+    return DesktopAuthSession(client: client, identity: identity);
   } catch (_) {
     return null;
   }
@@ -107,28 +199,38 @@ Future<gapis_auth.AutoRefreshingAuthClient?> desktopRestoreSession() async {
 /// [onConsentUrl] (the UI layer opens it with `url_launcher`), and waits for
 /// Google to redirect the browser back with the auth code. Persists the
 /// resulting token so [desktopRestoreSession] can silently restore it next
-/// launch, and keeps persisting it every time it's auto-refreshed.
-Future<gapis_auth.AutoRefreshingAuthClient> desktopSignIn({
+/// launch, and keeps persisting it every time it's auto-refreshed. Also
+/// resolves and persists [DesktopAuthSession.identity] via one userinfo
+/// call, now that the freshly-granted scopes include `openid`/
+/// `userinfo.email` (see `drive_scopes.dart`).
+Future<DesktopAuthSession> desktopSignIn({
   required void Function(Uri url) onConsentUrl,
 }) async {
   final clientId = await _loadClientId();
   final client = await auth_io.clientViaUserConsent(
     clientId,
-    const [kDriveFileScope],
+    const [kDriveFileScope, kOpenIdScope, kUserInfoEmailScope],
     (url) => onConsentUrl(Uri.parse(url)),
   );
   await _persist(client.credentials);
   _persistOnRefresh(client);
-  return client;
+
+  final identity = await _fetchIdentity(client);
+  if (identity != null) await _persistIdentity(identity);
+  return DesktopAuthSession(client: client, identity: identity);
 }
 
-/// Clears the local token cache. This is a local sign-out only — it does
-/// not revoke the grant on Google's side (no `disconnect`/revoke call),
-/// mirroring the scope of "sign out" everywhere else in the app.
+/// Clears the local token + identity cache. This is a local sign-out only —
+/// it does not revoke the grant on Google's side (no `disconnect`/revoke
+/// call), mirroring the scope of "sign out" everywhere else in the app.
 Future<void> desktopSignOut() async {
   final cacheFile = await _tokenCacheFile();
   if (await cacheFile.exists()) {
     await cacheFile.delete();
+  }
+  final identityFile = await _identityCacheFile();
+  if (await identityFile.exists()) {
+    await identityFile.delete();
   }
 }
 

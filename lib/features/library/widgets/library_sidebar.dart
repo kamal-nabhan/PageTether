@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/collection.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../settings/settings_screen.dart';
 import '../library_providers.dart';
 import 'collection_prompts.dart';
 import 'drive_auth_panel.dart';
@@ -83,9 +84,20 @@ class LibrarySidebar extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(24, 28, 24, 32),
-              child: _BrandHeader(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 28, 12, 32),
+              child: Row(
+                children: [
+                  const Expanded(child: _BrandHeader()),
+                  IconButton(
+                    tooltip: 'Settings',
+                    icon: const Icon(Icons.settings_outlined, size: 20),
+                    onPressed: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                    ),
+                  ),
+                ],
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),

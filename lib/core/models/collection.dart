@@ -14,7 +14,12 @@ import 'package:flutter/material.dart';
 /// `saveCollections` under `pt.collections.v1`.
 @immutable
 class Collection {
-  const Collection({required this.id, required this.name, this.colorIndex = 0});
+  Collection({
+    required this.id,
+    required this.name,
+    this.colorIndex = 0,
+    DateTime? updatedAt,
+  }) : updatedAt = updatedAt ?? DateTime.now();
 
   /// Stable, device-generated id — see [generateCollectionId]. Deliberately
   /// never derived from [name] so renaming a collection can never change the
@@ -28,22 +33,33 @@ class Collection {
   /// the sidebar/sheet without maintaining a second palette.
   final int colorIndex;
 
-  Collection copyWith({String? name, int? colorIndex}) => Collection(
-    id: id,
-    name: name ?? this.name,
-    colorIndex: colorIndex ?? this.colorIndex,
-  );
+  /// When this collection's name/color last changed — the last-write-wins
+  /// clock Phase 4's `SyncEngine` pushes as `pt_collections.updated_at`.
+  /// Defaults to "now" for a freshly-created collection; falls back the same
+  /// way for a pre-Phase-4a persisted record with none of its own (see
+  /// [Collection.fromJson]).
+  final DateTime updatedAt;
+
+  Collection copyWith({String? name, int? colorIndex, DateTime? updatedAt}) =>
+      Collection(
+        id: id,
+        name: name ?? this.name,
+        colorIndex: colorIndex ?? this.colorIndex,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
     'colorIndex': colorIndex,
+    'updatedAt': updatedAt.toIso8601String(),
   };
 
   factory Collection.fromJson(Map<String, dynamic> json) => Collection(
     id: json['id'] as String,
     name: json['name'] as String? ?? 'Untitled collection',
     colorIndex: json['colorIndex'] as int? ?? 0,
+    updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? ''),
   );
 }
 

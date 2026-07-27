@@ -43,7 +43,8 @@ class Book {
     this.driveSizeBytes,
     this.isFavorite = false,
     this.collectionIds = const {},
-  });
+    DateTime? updatedAt,
+  }) : updatedAt = updatedAt ?? lastOpenedAt;
 
   /// Stable content id: sha256 of the PDF's raw bytes, hex-encoded, whenever
   /// the content is known locally — which is always true for
@@ -121,6 +122,17 @@ class Book {
   /// `LibraryNotifier.removeCollectionFromAllBooks`).
   final Set<String> collectionIds;
 
+  /// When this book's syncable metadata (progress, favorite, collection
+  /// membership, title/author) last changed — the last-write-wins clock
+  /// Phase 4's `SyncEngine` pushes as `pt_books.updated_at` and compares
+  /// against the remote row's, so a device with a stale view of a book never
+  /// clobbers a newer edit made elsewhere. Defaults to [lastOpenedAt] when
+  /// not given explicitly (covers both a freshly-picked/uploaded book and a
+  /// pre-Phase-4a persisted record with no `updatedAt` of its own — see
+  /// [Book.fromJson]). Deliberately **not** bumped by cover-only changes
+  /// ([withCoverThumbnail]/[resetCover]), since covers aren't synced.
+  final DateTime updatedAt;
+
   bool get isDriveBook => source == BookSource.drive;
 
   LinearGradient get coverGradient =>
@@ -160,6 +172,7 @@ class Book {
     int? driveSizeBytes,
     bool? isFavorite,
     Set<String>? collectionIds,
+    DateTime? updatedAt,
   }) {
     return Book(
       id: id,
@@ -179,6 +192,12 @@ class Book {
       driveSizeBytes: driveSizeBytes ?? this.driveSizeBytes,
       isFavorite: isFavorite ?? this.isFavorite,
       collectionIds: collectionIds ?? this.collectionIds,
+      // Deliberately *not* `updatedAt ?? lastOpenedAt` here — that's only
+      // the constructor's fallback for a caller that never mentions
+      // `updatedAt` at all (a fresh book, or a pre-Phase-4a persisted
+      // record). An existing `Book` being copied must keep its own
+      // `updatedAt` unless the caller explicitly bumps it.
+      updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 
@@ -208,6 +227,9 @@ class Book {
       driveSizeBytes: driveSizeBytes,
       isFavorite: isFavorite,
       collectionIds: collectionIds,
+      // A cover-only change is never a syncable metadata change (see
+      // [updatedAt]'s doc comment) — preserve the existing clock exactly.
+      updatedAt: updatedAt,
     );
   }
 
@@ -233,10 +255,14 @@ class Book {
     'driveSizeBytes': driveSizeBytes,
     'isFavorite': isFavorite,
     'collectionIds': collectionIds.toList(),
+    'updatedAt': updatedAt.toIso8601String(),
   };
 
   factory Book.fromJson(Map<String, dynamic> json) {
     final thumbnailBase64 = json['coverThumbnailBase64'] as String?;
+    final lastOpenedAt =
+        DateTime.tryParse(json['lastOpenedAt'] as String? ?? '') ??
+        DateTime.fromMillisecondsSinceEpoch(0);
     return Book(
       id: json['id'] as String,
       title: json['title'] as String? ?? 'Untitled',
@@ -250,9 +276,7 @@ class Book {
       assetPath: json['assetPath'] as String?,
       filePath: json['filePath'] as String?,
       openedOnWeb: json['openedOnWeb'] as bool? ?? false,
-      lastOpenedAt:
-          DateTime.tryParse(json['lastOpenedAt'] as String? ?? '') ??
-          DateTime.fromMillisecondsSinceEpoch(0),
+      lastOpenedAt: lastOpenedAt,
       source: BookSource.values.firstWhere(
         (s) => s.name == json['source'],
         orElse: () => BookSource.local,
@@ -260,6 +284,11 @@ class Book {
       driveFileId: json['driveFileId'] as String?,
       driveSizeBytes: json['driveSizeBytes'] as int?,
       isFavorite: json['isFavorite'] as bool? ?? false,
+      // Falls back to `lastOpenedAt` for records persisted before Phase 4a
+      // added this field, matching the constructor's own default.
+      updatedAt:
+          DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+          lastOpenedAt,
       collectionIds:
           (json['collectionIds'] as List<dynamic>?)
               ?.map((e) => e as String)
