@@ -23,6 +23,19 @@ import 'drive_scopes.dart';
 const _tokenFileName = 'drive_token.json';
 const _identityFileName = 'drive_identity.json';
 
+/// Desktop OAuth "Desktop app" client, embedded into release builds at build
+/// time via `--dart-define` so published users never supply their own
+/// credentials.json. Empty in dev builds that omit the defines — [_loadClientId]
+/// then falls back to reading a local credentials.json. An installed/desktop
+/// app's client secret is not confidential per OAuth 2.0 for Native Apps
+/// (RFC 8252), so baking it into the distributed binary is expected practice.
+const _embeddedDesktopClientId = String.fromEnvironment(
+  'GOOGLE_DESKTOP_CLIENT_ID',
+);
+const _embeddedDesktopClientSecret = String.fromEnvironment(
+  'GOOGLE_DESKTOP_CLIENT_SECRET',
+);
+
 /// Minimal sync identity resolved from Google's OIDC userinfo endpoint (see
 /// [_fetchIdentity]) once the desktop loopback flow also holds the
 /// `openid`/`userinfo.email` scopes (see `drive_scopes.dart`). [id] is the
@@ -129,12 +142,24 @@ Future<File?> _findCredentialsFile() async {
 }
 
 Future<gapis_auth.ClientId> _loadClientId() async {
+  // Prefer the client baked into the build — this is how distributed releases
+  // ship, so end users never need to supply a credentials.json.
+  if (_embeddedDesktopClientId.isNotEmpty &&
+      _embeddedDesktopClientSecret.isNotEmpty) {
+    return gapis_auth.ClientId(
+      _embeddedDesktopClientId,
+      _embeddedDesktopClientSecret,
+    );
+  }
+  // Fall back to a local credentials.json (developer machines / dev builds).
   final file = await _findCredentialsFile();
   if (file == null) {
     throw const DriveAuthUnavailableException(
-      'credentials.json not found. Export an OAuth "Desktop app" client '
-      'from Google Cloud Console and place it at the project root (or next '
-      'to the built executable) as credentials.json.',
+      'No Google Drive desktop client configured. Either build with '
+      '--dart-define=GOOGLE_DESKTOP_CLIENT_ID=… '
+      '--dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=…, or export an OAuth '
+      '"Desktop app" client from Google Cloud Console and place it at the '
+      'project root (or next to the executable) as credentials.json.',
     );
   }
   try {

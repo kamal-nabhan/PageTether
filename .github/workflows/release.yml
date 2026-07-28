@@ -97,7 +97,10 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: Build Windows (release)
-        run: flutter build windows --release
+        # Embeds the Desktop OAuth client (set these as repo secrets) so the
+        # published Windows build needs no credentials.json. If unset, the app
+        # falls back to a local credentials.json at runtime.
+        run: flutter build windows --release --dart-define=GOOGLE_DESKTOP_CLIENT_ID=${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }} --dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
       - name: Zip Windows build
         run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath PageTether-${{ github.ref_name }}-windows.zip
       - name: Attach Windows build to the release
