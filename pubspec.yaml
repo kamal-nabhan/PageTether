@@ -75,6 +75,10 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
+  # Used only by tool/generate_icons.dart to produce the source assets in
+  # assets/icon/ (square/opaque main icon + safe-zone-padded adaptive
+  # foreground) from the raw designer PNGs before flutter_launcher_icons runs.
+  image: ^4.5.4
 flutter:
 
   # The following line ensures that the Material Icons font is
@@ -114,3 +118,18 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+flutter_launcher_icons:
+  image_path: assets/icon/pagetether_icon.png
+  android: true
+  adaptive_icon_background: "#6C5CE7"
+  adaptive_icon_foreground: assets/icon/pagetether_icon_foreground.png
+  ios: true
+  remove_alpha_ios: true
+  web:
+    generate: true
+    background_color: "#0F0F17"
+    theme_color: "#6C5CE7"
+  windows:
+    generate: true
+    icon_size: 48

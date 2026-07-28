@@ -130,3 +130,7 @@ __pycache__/
 .venv/
 *.log
 .cache/
+
+*.b64
+*.b64.txt
+keystore*.txt
