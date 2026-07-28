@@ -42,6 +42,26 @@ jobs:
       - name: Zip web bundle
         run: cd build/web && zip -r "$GITHUB_WORKSPACE/PageTether-${{ github.ref_name }}-web.zip" .
 
+      - name: Configure Android release signing (if secrets present)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > android/app/pagetether-release.jks
+            {
+              echo "storePassword=$STORE_PW"
+              echo "keyPassword=$KEY_PW"
+              echo "keyAlias=$KEY_ALIAS"
+              echo "storeFile=pagetether-release.jks"
+            } > android/key.properties
+            echo "Android release signing configured (release keystore)."
+          else
+            echo "ANDROID_KEYSTORE_BASE64 secret not set — release APK will be debug-signed."
+          fi
+
       - name: Build Android APKs (per-ABI)
         run: flutter build apk --release --split-per-abi --dart-define=GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID
       - name: Build Android APK (universal)
