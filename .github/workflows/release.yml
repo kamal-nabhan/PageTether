@@ -1,0 +1,87 @@
+name: Release
+
+# Publishes downloadable builds to the GitHub Releases page whenever a
+# version tag (e.g. v0.1.0) is pushed. Web + Android are built on Ubuntu,
+# Windows on windows-latest; both jobs attach their artifacts to the same
+# release for the tag.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # required to create/update the GitHub Release
+
+env:
+  FLUTTER_VERSION: '3.44.8'
+  # The OAuth *Web* client id is public (it ships in the web/app anyway), so
+  # baking it into release builds is fine. Override per-repo by setting an
+  # Actions variable named GOOGLE_WEB_CLIENT_ID (Settings → Secrets and
+  # variables → Actions → Variables); the fallback below is the default.
+  GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID || '76503627531-qhnsfvmns4mbpovd2c0bpd30ba81ejbo.apps.googleusercontent.com' }}
+
+jobs:
+  web-android:
+    name: Web + Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+
+      - name: Build web bundle
+        run: flutter build web --release --dart-define=GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID
+      - name: Zip web bundle
+        run: cd build/web && zip -r "$GITHUB_WORKSPACE/PageTether-${{ github.ref_name }}-web.zip" .
+
+      - name: Build Android APKs (per-ABI)
+        run: flutter build apk --release --split-per-abi --dart-define=GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID
+      - name: Build Android APK (universal)
+        run: flutter build apk --release --dart-define=GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp "PageTether-${{ github.ref_name }}-web.zip" dist/
+          for f in build/app/outputs/flutter-apk/*.apk; do
+            cp "$f" "dist/PageTether-${{ github.ref_name }}-$(basename "$f")"
+          done
+          ls -la dist
+
+      - name: Publish web + Android to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body_path: CHANGELOG.md
+
+  windows:
+    name: Windows
+    needs: web-android # ensure the release already exists, then append to it
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build Windows (release)
+        run: flutter build windows --release
+      - name: Zip Windows build
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath PageTether-${{ github.ref_name }}-windows.zip
+      - name: Attach Windows build to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PageTether-${{ github.ref_name }}-windows.zip
+          fail_on_unmatched_files: true
