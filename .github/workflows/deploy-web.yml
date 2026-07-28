@@ -40,10 +40,9 @@ jobs:
       - run: flutter pub get
       - name: Build web (project-page base href)
         run: flutter build web --release --base-href /PageTether/ --dart-define=GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID
-      # Auto-enables Pages (Actions source) so no manual repo-settings toggle.
+      # Pages must be enabled once manually (Settings → Pages → Source:
+      # "GitHub Actions") — the default workflow token can't enable it via API.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: build/web
