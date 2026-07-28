@@ -5,6 +5,22 @@ All notable changes to PageTether are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-07-28
+
+### Added
+
+- **Release automation**: a GitHub Actions release workflow publishes the web
+  bundle, Android APKs (per-ABI + universal), and the Windows build to the
+  GitHub Releases page on each version tag.
+- **Signed Android releases**: release builds are signed with a release
+  keystore (`key.properties` locally / GitHub secrets in CI), so Google Drive
+  sign-in works on the published APK.
+
+### Changed
+
+- Google OAuth consent screen published to production, so any Google account
+  can sign in (previously limited to test users).
+
 ## [0.1.0] - 2026-07-27
 
 Initial cross-platform release of the Flutter rewrite (web, Windows, Android).
@@ -22,7 +38,6 @@ Initial cross-platform release of the Flutter rewrite (web, Windows, Android).
   syncs reading position, favorites, and collections across devices.
 - **CI**: GitHub Actions workflow running `flutter analyze` and the test
   suite (51 tests) on every push/PR.
-- App icon and branding across Android (including adaptive icon), iOS, web,
-  and Windows, generated from the in-app brand mark (gradient + book glyph).
 
+[0.1.1]: https://github.com/kamal-nabhan/PageTether/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kamal-nabhan/PageTether/releases/tag/v0.1.0
