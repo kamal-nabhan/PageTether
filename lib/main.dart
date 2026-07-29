@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app.dart';
 import 'core/services/fullscreen/fullscreen_service.dart';
 import 'core/storage/library_store.dart';
+import 'features/graph/graph_providers.dart';
 import 'features/library/library_bootstrap.dart';
 import 'features/library/library_providers.dart';
 import 'features/settings/settings_providers.dart';
@@ -23,6 +24,9 @@ Future<void> main() async {
   final initialCollections = await store.loadCollections();
   final initialViewMode = await store.loadViewMode();
   final initialSyncCredentials = await store.loadSyncCredentials();
+  final initialBoards = await store.loadBoards();
+  final initialNodes = await store.loadNodes();
+  final initialEdges = await store.loadEdges();
 
   runApp(
     ProviderScope(
@@ -36,6 +40,9 @@ Future<void> main() async {
         syncCredentialsProvider.overrideWith(
           () => SyncCredentialsNotifier(initialSyncCredentials),
         ),
+        boardsProvider.overrideWith(() => BoardsNotifier(initialBoards)),
+        graphNodesProvider.overrideWith(() => GraphNodesNotifier(initialNodes)),
+        graphEdgesProvider.overrideWith(() => GraphEdgesNotifier(initialEdges)),
       ],
       child: const PageTetherApp(),
     ),

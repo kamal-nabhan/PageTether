@@ -9,6 +9,7 @@ import '../../core/models/sync_credentials.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/sync/sync_engine.dart';
 import '../../core/storage/library_store.dart';
+import '../graph/graph_providers.dart';
 import '../library/library_providers.dart';
 
 /// Holds the user's pasted-in Supabase URL/anon key (see
@@ -342,8 +343,14 @@ class SyncNotifier extends Notifier<SyncRunState> {
       // Pulling + merging first (last-write-wins — see mergeRemoteBooks) makes
       // local hold the newest of (local, remote) per row; the push below then
       // writes that already-newest state back, so nothing newer is clobbered.
+      // Boards/nodes/edges (the annotation graph model) follow the exact same
+      // pull+merge-then-push order, for the exact same reason — see
+      // BoardsNotifier/GraphNodesNotifier/GraphEdgesNotifier.mergeRemote*.
       final remoteBooks = await engine.pullBooks(userId);
       final remoteCollections = await engine.pullCollections(userId);
+      final remoteBoards = await engine.pullBoards(userId);
+      final remoteNodes = await engine.pullNodes(userId);
+      final remoteEdges = await engine.pullEdges(userId);
 
       final bookMerge = ref
           .read(libraryProvider.notifier)
@@ -351,12 +358,18 @@ class SyncNotifier extends Notifier<SyncRunState> {
       final collectionMerge = ref
           .read(collectionsProvider.notifier)
           .mergeRemoteCollections(remoteCollections);
+      ref.read(boardsProvider.notifier).mergeRemoteBoards(remoteBoards);
+      ref.read(graphNodesProvider.notifier).mergeRemoteNodes(remoteNodes);
+      ref.read(graphEdgesProvider.notifier).mergeRemoteEdges(remoteEdges);
 
       if (!silent) state = const SyncRunInProgress('Pushing local changes…');
       final books = ref.read(libraryProvider);
       final collections = ref.read(collectionsProvider);
       await engine.pushBooks(userId, books);
       await engine.pushCollections(userId, collections);
+      await engine.pushBoards(userId, ref.read(boardsProvider));
+      await engine.pushNodes(userId, ref.read(graphNodesProvider));
+      await engine.pushEdges(userId, ref.read(graphEdgesProvider));
 
       autoStatus.setSynced();
       if (!silent) {
