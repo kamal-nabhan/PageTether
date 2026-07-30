@@ -2,6 +2,13 @@ import 'package:supabase/supabase.dart';
 
 import '../../models/book.dart';
 import '../../models/collection.dart';
+import '../../models/graph/board.dart';
+import '../../models/graph/graph_edge.dart';
+import '../../models/graph/graph_node.dart';
+import '../../models/graph/graph_style.dart';
+import '../../models/graph/node_anchor.dart';
+import '../../models/graph/node_content.dart';
+import '../../models/graph/node_kind.dart';
 import '../../models/sync_credentials.dart';
 
 /// A `pt_books` row (see `schema.sql`) — a thinner, sync-only shape than
@@ -112,6 +119,211 @@ class SyncedCollection {
   };
 }
 
+/// A `pt_boards` row (see `schema.sql`).
+class SyncedBoard {
+  const SyncedBoard({
+    required this.id,
+    required this.title,
+    required this.bookId,
+    required this.isDefaultForBook,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final String title;
+  final String? bookId;
+  final bool isDefaultForBook;
+  final DateTime updatedAt;
+
+  factory SyncedBoard.fromBoard(Board board) => SyncedBoard(
+    id: board.id,
+    title: board.title,
+    bookId: board.bookId,
+    isDefaultForBook: board.isDefaultForBook,
+    updatedAt: board.updatedAt,
+  );
+
+  factory SyncedBoard.fromRow(Map<String, dynamic> row) => SyncedBoard(
+    id: row['id'] as String,
+    title: row['title'] as String? ?? '',
+    bookId: row['book_id'] as String?,
+    isDefaultForBook: row['is_default_for_book'] as bool? ?? false,
+    updatedAt: _parseTimestamp(row['updated_at']),
+  );
+
+  Map<String, dynamic> toRow(String userId) => {
+    'user_id': userId,
+    'id': id,
+    'title': title,
+    'book_id': bookId,
+    'is_default_for_book': isDefaultForBook,
+    'updated_at': updatedAt.toUtc().toIso8601String(),
+  };
+}
+
+/// A `pt_nodes` row (see `schema.sql`). Unlike [SyncedBook] this thins
+/// nothing out — every [GraphNode] field except [GraphNode.createdAt] has a
+/// column/JSON-column here, since [GraphNode.createdAt] is a purely local
+/// concept (`pt_nodes` has no `created_at` column — see that table's comment
+/// in `schema.sql`); merging a remote row back into a local [GraphNode]
+/// therefore always keeps the local `createdAt` (see
+/// `GraphNodesNotifier.mergeRemoteNodes`).
+class SyncedGraphNode {
+  const SyncedGraphNode({
+    required this.id,
+    required this.boardId,
+    required this.kind,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+    required this.rotation,
+    required this.z,
+    required this.style,
+    required this.content,
+    required this.anchor,
+    required this.contentText,
+    required this.badge,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final String boardId;
+  final NodeKind kind;
+  final double x;
+  final double y;
+  final double w;
+  final double h;
+  final double rotation;
+  final double z;
+  final GraphStyle style;
+  final NodeContent content;
+  final NodeAnchor? anchor;
+  final String contentText;
+  final String? badge;
+  final DateTime updatedAt;
+
+  factory SyncedGraphNode.fromNode(GraphNode node) => SyncedGraphNode(
+    id: node.id,
+    boardId: node.boardId,
+    kind: node.kind,
+    x: node.x,
+    y: node.y,
+    w: node.w,
+    h: node.h,
+    rotation: node.rotation,
+    z: node.z,
+    style: node.style,
+    content: node.content,
+    anchor: node.anchor,
+    contentText: node.contentText,
+    badge: node.badge,
+    updatedAt: node.updatedAt,
+  );
+
+  factory SyncedGraphNode.fromRow(Map<String, dynamic> row) =>
+      SyncedGraphNode(
+        id: row['id'] as String,
+        boardId: row['board_id'] as String? ?? '',
+        kind: NodeKind.values.firstWhere(
+          (k) => k.name == row['kind'],
+          orElse: () => NodeKind.textNote,
+        ),
+        x: (row['x'] as num?)?.toDouble() ?? 0,
+        y: (row['y'] as num?)?.toDouble() ?? 0,
+        w: (row['w'] as num?)?.toDouble() ?? 0,
+        h: (row['h'] as num?)?.toDouble() ?? 0,
+        rotation: (row['rotation'] as num?)?.toDouble() ?? 0,
+        z: (row['z'] as num?)?.toDouble() ?? 0,
+        style: GraphStyle.fromJson(row['style'] as Map<String, dynamic>?),
+        content: NodeContent.fromJson(row['content'] as Map<String, dynamic>?),
+        anchor: NodeAnchor.fromJson(row['anchor'] as Map<String, dynamic>?),
+        contentText: row['content_text'] as String? ?? '',
+        badge: row['badge'] as String?,
+        updatedAt: _parseTimestamp(row['updated_at']),
+      );
+
+  Map<String, dynamic> toRow(String userId) => {
+    'user_id': userId,
+    'id': id,
+    'board_id': boardId,
+    'kind': kind.name,
+    'x': x,
+    'y': y,
+    'w': w,
+    'h': h,
+    'rotation': rotation,
+    'z': z,
+    'style': style.toJson(),
+    'content': content.toJson(),
+    'anchor': anchor?.toJson(),
+    'content_text': contentText,
+    'badge': badge,
+    'updated_at': updatedAt.toUtc().toIso8601String(),
+  };
+}
+
+/// A `pt_edges` row (see `schema.sql`).
+class SyncedGraphEdge {
+  const SyncedGraphEdge({
+    required this.id,
+    required this.boardId,
+    required this.fromNodeId,
+    required this.toNodeId,
+    required this.kind,
+    required this.label,
+    required this.style,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final String boardId;
+  final String fromNodeId;
+  final String toNodeId;
+  final EdgeKind kind;
+  final String? label;
+  final GraphStyle style;
+  final DateTime updatedAt;
+
+  factory SyncedGraphEdge.fromEdge(GraphEdge edge) => SyncedGraphEdge(
+    id: edge.id,
+    boardId: edge.boardId,
+    fromNodeId: edge.fromNodeId,
+    toNodeId: edge.toNodeId,
+    kind: edge.kind,
+    label: edge.label,
+    style: edge.style,
+    updatedAt: edge.updatedAt,
+  );
+
+  factory SyncedGraphEdge.fromRow(Map<String, dynamic> row) =>
+      SyncedGraphEdge(
+        id: row['id'] as String,
+        boardId: row['board_id'] as String? ?? '',
+        fromNodeId: row['from_node_id'] as String? ?? '',
+        toNodeId: row['to_node_id'] as String? ?? '',
+        kind: EdgeKind.values.firstWhere(
+          (k) => k.name == row['kind'],
+          orElse: () => EdgeKind.arrow,
+        ),
+        label: row['label'] as String?,
+        style: GraphStyle.fromJson(row['style'] as Map<String, dynamic>?),
+        updatedAt: _parseTimestamp(row['updated_at']),
+      );
+
+  Map<String, dynamic> toRow(String userId) => {
+    'user_id': userId,
+    'id': id,
+    'board_id': boardId,
+    'from_node_id': fromNodeId,
+    'to_node_id': toNodeId,
+    'kind': kind.name,
+    'label': label,
+    'style': style.toJson(),
+    'updated_at': updatedAt.toUtc().toIso8601String(),
+  };
+}
+
 DateTime _parseTimestamp(Object? value) =>
     DateTime.tryParse(value as String? ?? '')?.toUtc() ??
     DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
@@ -137,9 +349,10 @@ class SyncConnectionResult {
   final String? message;
 }
 
-/// Talks to `pt_books`/`pt_collections` (see `schema.sql`) over a
-/// caller-supplied `SupabaseClient`; `pt_annotations` is defined in the
-/// schema for Phase 5 but not touched here.
+/// Talks to `pt_books`/`pt_collections`/`pt_boards`/`pt_nodes`/`pt_edges`
+/// (see `schema.sql`) over a caller-supplied `SupabaseClient`;
+/// `pt_annotations` predates the annotation-graph model (Boards/GraphNodes/
+/// GraphEdges) it was superseded by and is not touched here.
 ///
 /// Unlike the Phase 4a/4b version of this class, a [SyncEngine] instance
 /// does **not** own or build its own `SupabaseClient` — it's handed one
@@ -161,6 +374,9 @@ class SyncEngine {
 
   static const _booksTable = 'pt_books';
   static const _collectionsTable = 'pt_collections';
+  static const _boardsTable = 'pt_boards';
+  static const _nodesTable = 'pt_nodes';
+  static const _edgesTable = 'pt_edges';
 
   /// A lightweight reachability + schema check: selects one row (if any)
   /// from `pt_books`. Callers check [SyncCredentials.isConfigured] (and thus
@@ -253,5 +469,56 @@ class SyncEngine {
         .select()
         .eq('user_id', userId);
     return [for (final row in rows) SyncedCollection.fromRow(row)];
+  }
+
+  /// Upserts every one of [boards] as [userId]'s rows, keyed by
+  /// `(user_id, id)` — see [pushBooks]'s doc for the same "overwrites
+  /// outright" caveat.
+  Future<void> pushBoards(String userId, List<Board> boards) async {
+    if (boards.isEmpty) return;
+    final rows = [
+      for (final board in boards) SyncedBoard.fromBoard(board).toRow(userId),
+    ];
+    await _client.from(_boardsTable).upsert(rows, onConflict: 'user_id,id');
+  }
+
+  /// Every `pt_boards` row belonging to [userId].
+  Future<List<SyncedBoard>> pullBoards(String userId) async {
+    final rows = await _client.from(_boardsTable).select().eq('user_id', userId);
+    return [for (final row in rows) SyncedBoard.fromRow(row)];
+  }
+
+  /// Upserts every one of [nodes] as [userId]'s rows, keyed by
+  /// `(user_id, id)` — see [pushBooks]'s doc for the same "overwrites
+  /// outright" caveat.
+  Future<void> pushNodes(String userId, List<GraphNode> nodes) async {
+    if (nodes.isEmpty) return;
+    final rows = [
+      for (final node in nodes) SyncedGraphNode.fromNode(node).toRow(userId),
+    ];
+    await _client.from(_nodesTable).upsert(rows, onConflict: 'user_id,id');
+  }
+
+  /// Every `pt_nodes` row belonging to [userId].
+  Future<List<SyncedGraphNode>> pullNodes(String userId) async {
+    final rows = await _client.from(_nodesTable).select().eq('user_id', userId);
+    return [for (final row in rows) SyncedGraphNode.fromRow(row)];
+  }
+
+  /// Upserts every one of [edges] as [userId]'s rows, keyed by
+  /// `(user_id, id)` — see [pushBooks]'s doc for the same "overwrites
+  /// outright" caveat.
+  Future<void> pushEdges(String userId, List<GraphEdge> edges) async {
+    if (edges.isEmpty) return;
+    final rows = [
+      for (final edge in edges) SyncedGraphEdge.fromEdge(edge).toRow(userId),
+    ];
+    await _client.from(_edgesTable).upsert(rows, onConflict: 'user_id,id');
+  }
+
+  /// Every `pt_edges` row belonging to [userId].
+  Future<List<SyncedGraphEdge>> pullEdges(String userId) async {
+    final rows = await _client.from(_edgesTable).select().eq('user_id', userId);
+    return [for (final row in rows) SyncedGraphEdge.fromRow(row)];
   }
 }

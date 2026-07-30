@@ -134,3 +134,6 @@ __pycache__/
 *.b64
 *.b64.txt
 keystore*.txt
+
+# Claude Code local worktrees / scratch
+.claude/worktrees/

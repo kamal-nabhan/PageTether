@@ -4,6 +4,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
 import '../models/collection.dart';
+import '../models/graph/board.dart';
+import '../models/graph/graph_edge.dart';
+import '../models/graph/graph_node.dart';
 import '../models/library_view_mode.dart';
 import '../models/sync_credentials.dart';
 
@@ -32,6 +35,23 @@ class LibraryStore {
   // just persisted in shared_preferences instead of a file since it's
   // small and user-editable rather than an opaque OAuth blob.
   static const _syncCredentialsKey = 'pt.sync.credentials.v1';
+
+  // --- Annotation graph model (Boards/GraphNodes/GraphEdges) ---
+  // Same "one JSON object mapping id -> record" shape as [_key] above, each
+  // under its own key so boards/nodes/edges can be loaded/saved
+  // independently.
+  //
+  // NOTE: shared_preferences is an *interim* store for this, same as it was
+  // for the book library in Phase 1.1 — fine for a few hundred rows, but a
+  // canvas is expected to eventually hold many hundreds/thousands of nodes
+  // per board (ink strokes especially), at which point encoding/decoding one
+  // giant JSON blob per read/write will visibly lag. A real local database
+  // (e.g. `drift`/SQLite, with a proper per-board index) will be needed
+  // before the canvas UI ships at scale — flagged here rather than built
+  // now, per this phase's "foundation only" scope.
+  static const _boardsKey = 'pt.boards.v1';
+  static const _nodesKey = 'pt.nodes.v1';
+  static const _edgesKey = 'pt.edges.v1';
 
   final SharedPreferences _prefs;
 
@@ -138,8 +158,111 @@ class LibraryStore {
     await _prefs.remove(_syncCredentialsKey);
   }
 
-  Map<String, dynamic> _readMap() {
-    final raw = _prefs.getString(_key);
+  // --- Boards ---
+
+  /// Loads every persisted [Board], in whatever order they were saved.
+  Future<List<Board>> loadBoards() async {
+    final decoded = _readIdMap(_boardsKey);
+    return [
+      for (final entry in decoded.values)
+        Board.fromJson(entry as Map<String, dynamic>),
+    ];
+  }
+
+  /// Inserts or updates a single board record in place.
+  Future<void> upsertBoard(Board board) async {
+    final decoded = _readIdMap(_boardsKey);
+    decoded[board.id] = board.toJson();
+    await _writeIdMap(_boardsKey, decoded);
+  }
+
+  /// Deletes a single board record. No-op if [id] isn't present.
+  Future<void> removeBoard(String id) async {
+    final decoded = _readIdMap(_boardsKey);
+    if (decoded.remove(id) == null) return;
+    await _writeIdMap(_boardsKey, decoded);
+  }
+
+  /// Replaces the entire persisted board list with [boards].
+  Future<void> saveAllBoards(List<Board> boards) async {
+    await _writeIdMap(_boardsKey, {
+      for (final board in boards) board.id: board.toJson(),
+    });
+  }
+
+  // --- Graph nodes ---
+
+  /// Loads every persisted [GraphNode], in whatever order they were saved.
+  Future<List<GraphNode>> loadNodes() async {
+    final decoded = _readIdMap(_nodesKey);
+    return [
+      for (final entry in decoded.values)
+        GraphNode.fromJson(entry as Map<String, dynamic>),
+    ];
+  }
+
+  /// Inserts or updates a single node record in place.
+  Future<void> upsertNode(GraphNode node) async {
+    final decoded = _readIdMap(_nodesKey);
+    decoded[node.id] = node.toJson();
+    await _writeIdMap(_nodesKey, decoded);
+  }
+
+  /// Deletes a single node record. No-op if [id] isn't present.
+  Future<void> removeNode(String id) async {
+    final decoded = _readIdMap(_nodesKey);
+    if (decoded.remove(id) == null) return;
+    await _writeIdMap(_nodesKey, decoded);
+  }
+
+  /// Replaces the entire persisted node list with [nodes].
+  Future<void> saveAllNodes(List<GraphNode> nodes) async {
+    await _writeIdMap(_nodesKey, {
+      for (final node in nodes) node.id: node.toJson(),
+    });
+  }
+
+  // --- Graph edges ---
+
+  /// Loads every persisted [GraphEdge], in whatever order they were saved.
+  Future<List<GraphEdge>> loadEdges() async {
+    final decoded = _readIdMap(_edgesKey);
+    return [
+      for (final entry in decoded.values)
+        GraphEdge.fromJson(entry as Map<String, dynamic>),
+    ];
+  }
+
+  /// Inserts or updates a single edge record in place.
+  Future<void> upsertEdge(GraphEdge edge) async {
+    final decoded = _readIdMap(_edgesKey);
+    decoded[edge.id] = edge.toJson();
+    await _writeIdMap(_edgesKey, decoded);
+  }
+
+  /// Deletes a single edge record. No-op if [id] isn't present.
+  Future<void> removeEdge(String id) async {
+    final decoded = _readIdMap(_edgesKey);
+    if (decoded.remove(id) == null) return;
+    await _writeIdMap(_edgesKey, decoded);
+  }
+
+  /// Replaces the entire persisted edge list with [edges].
+  Future<void> saveAllEdges(List<GraphEdge> edges) async {
+    await _writeIdMap(_edgesKey, {
+      for (final edge in edges) edge.id: edge.toJson(),
+    });
+  }
+
+  Map<String, dynamic> _readMap() => _readIdMap(_key);
+
+  Future<void> _writeMap(Map<String, dynamic> map) => _writeIdMap(_key, map);
+
+  /// Generic "id -> JSON record" map reader, backing [_readMap] (books) and
+  /// the boards/nodes/edges loaders above — one key per record type, same
+  /// shape as [_key]'s book map.
+  Map<String, dynamic> _readIdMap(String key) {
+    final raw = _prefs.getString(key);
     if (raw == null || raw.isEmpty) return <String, dynamic>{};
     try {
       return jsonDecode(raw) as Map<String, dynamic>;
@@ -150,7 +273,7 @@ class LibraryStore {
     }
   }
 
-  Future<void> _writeMap(Map<String, dynamic> map) async {
-    await _prefs.setString(_key, jsonEncode(map));
+  Future<void> _writeIdMap(String key, Map<String, dynamic> map) async {
+    await _prefs.setString(key, jsonEncode(map));
   }
 }
