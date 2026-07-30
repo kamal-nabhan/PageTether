@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/graph/board.dart';
 import '../../core/models/graph/graph_edge.dart';
+import '../../core/models/graph/graph_ids.dart';
 import '../../core/models/graph/graph_node.dart';
 import '../../core/services/sync/sync_engine.dart';
 import '../../core/storage/library_store.dart';
@@ -50,6 +51,29 @@ class BoardsNotifier extends Notifier<List<Board>> {
     if (!state.any((b) => b.id == id)) return;
     state = [for (final b in state) if (b.id != id) b];
     unawaited(_store.removeBoard(id));
+  }
+
+  /// Returns [bookId]'s default board — the one [Board] with
+  /// [Board.isDefaultForBook] true and [Board.bookId] == [bookId] — creating
+  /// and persisting it on first use. This is what lets the reader attach a
+  /// highlight/underline to *some* board the moment a book is opened, rather
+  /// than requiring the user to first visit a not-yet-built "create board"
+  /// UI (the canvas UI itself is a later phase). [title] only matters the
+  /// first time this is called for a given [bookId]; a subsequent call
+  /// simply returns the already-created board, ignoring [title].
+  Board getOrCreateDefaultBoard(String bookId, {String title = 'Highlights'}) {
+    for (final board in state) {
+      if (board.bookId == bookId && board.isDefaultForBook) return board;
+    }
+    final board = Board(
+      id: generateGraphId('board'),
+      title: title,
+      bookId: bookId,
+      isDefaultForBook: true,
+    );
+    state = [...state, board];
+    unawaited(_store.upsertBoard(board));
+    return board;
   }
 
   /// Merges [remoteBoards] (pulled via `SyncEngine.pullBoards`) into the
