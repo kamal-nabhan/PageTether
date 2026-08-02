@@ -6,15 +6,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../../core/models/book.dart';
+import '../../core/models/graph/graph_node.dart';
+import '../../core/models/graph/node_kind.dart';
 import '../../core/pdf/pdf_source.dart';
 import '../../core/services/auth/auth_notifier.dart';
 import '../../core/services/auth/auth_state.dart';
 import '../../core/services/fullscreen/fullscreen_service.dart';
 import '../../core/services/sync/sync_engine.dart';
 import '../../core/theme/app_theme.dart';
+import '../graph/graph_providers.dart';
 import '../library/library_providers.dart';
 import '../settings/settings_providers.dart';
+import 'annotation_geometry.dart';
 import 'pdf_layouts.dart';
+import 'widgets/annotation_overlay.dart';
+import 'widgets/annotation_toolbar.dart';
 import 'widgets/pagination_bar.dart';
 
 /// Renders a single PDF with pdfrx.
@@ -35,6 +41,14 @@ import 'widgets/pagination_bar.dart';
 /// [_ReaderScreenState._pushBookRow]. Entirely quiet on failure and a no-op
 /// unless both [SyncCredentials.isConfigured] and
 /// [AuthStateSignedIn.canSync] — see [_ReaderScreenState._canSync].
+///
+/// Also owns the highlight/underline UI on top of pdfrx's text selection:
+/// [AnnotationToolbar] turns the current [PdfTextSelection] into a
+/// [GraphNode] (see [_ReaderScreenState._createAnnotation]), and
+/// [AnnotationOverlay] (wired via `_PdfSurface`'s `pageOverlaysBuilder`)
+/// renders every such node back onto the page it was anchored to. See
+/// `features/reader/annotation_geometry.dart` for the pure quad-normalization/
+/// node-building logic these two lean on.
 class ReaderScreen extends ConsumerStatefulWidget {
   const ReaderScreen({super.key, required this.book});
 
@@ -68,6 +82,28 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// once per reader session, even if pdfrx's `onViewerReady` callback were
   /// ever invoked more than once.
   bool _pulledOnOpen = false;
+
+  /// Set once by [_onViewerReady] — needed by [_createAnnotation] to look up
+  /// a page's point size (`PdfPage.width`/`.height`) so a selection's quads
+  /// can be normalized (see `annotation_geometry.dart`).
+  PdfDocument? _document;
+
+  /// The viewer's current text selection, mirrored here purely so the
+  /// toolbar's Highlight/Underline buttons know whether there's anything to
+  /// act on (see [AnnotationToolbar.canCreate]) — updated by
+  /// [_onTextSelectionChange], which pdfrx calls on every selection change.
+  PdfTextSelection? _textSelection;
+
+  /// Index into [kAnnotationColors] — the color a new annotation is created
+  /// with, or (while [_selectedAnnotationId] is set) the color choice that
+  /// recolors the selected annotation on tap.
+  int _selectedColorIndex = 0;
+
+  /// The id of the annotation last tapped via [AnnotationOverlay], if any —
+  /// non-null switches [AnnotationToolbar] into
+  /// [AnnotationToolbarMode.select] (delete/recolor) instead of its default
+  /// create-from-selection mode.
+  String? _selectedAnnotationId;
 
   @override
   void initState() {
@@ -136,6 +172,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// where the "on open" pull-and-maybe-jump fires and the 30s periodic pull
   /// timer starts (see the class doc).
   void _onViewerReady(PdfDocument document, PdfViewerController controller) {
+    _document = document;
     if (_pulledOnOpen) return;
     _pulledOnOpen = true;
     if (!_canSync) return;
@@ -200,6 +237,138 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     } catch (e) {
       if (mounted) ref.read(autoSyncStatusProvider.notifier).setFailed('$e');
     }
+  }
+
+  /// Mirrors the viewer's current text selection into [_textSelection] —
+  /// called by pdfrx (see `_PdfSurface`'s `textSelectionParams`) on every
+  /// selection change, purely so [AnnotationToolbar] knows whether the
+  /// Highlight/Underline buttons have anything to act on.
+  void _onTextSelectionChange(PdfTextSelection selection) {
+    if (!mounted) return;
+    setState(() => _textSelection = selection);
+  }
+
+  /// Turns the current text selection into a new highlight/underline
+  /// [GraphNode] per page it spans (a selection is normally single-page, but
+  /// this handles a selection dragged across a page boundary by creating one
+  /// node per page rather than silently dropping the rest — each
+  /// `PdfPageTextRange` already knows its own page). No-ops quietly if
+  /// there's no selection or the document isn't ready yet.
+  ///
+  /// See `annotation_geometry.dart` for the pure quad-normalization
+  /// ([normalizedRectFromPdfRect]) and node-building ([buildAnnotationNode])
+  /// logic this composes; [BoardsNotifier.getOrCreateDefaultBoard] supplies
+  /// the board every one of this book's annotations lands on.
+  Future<void> _createAnnotation(NodeKind kind) async {
+    final selection = _textSelection;
+    final document = _document;
+    if (selection == null || !selection.hasSelectedText || document == null) {
+      return;
+    }
+    final ranges = await selection.getSelectedTextRanges();
+    if (ranges.isEmpty || !mounted) return;
+
+    final board = ref
+        .read(boardsProvider.notifier)
+        .getOrCreateDefaultBoard(
+          widget.book.id,
+          title: '${widget.book.title} highlights',
+        );
+    final color = kAnnotationColors[_selectedColorIndex];
+    final style = annotationStyle(kind, color);
+
+    for (final range in ranges) {
+      final pageNumber = range.pageNumber;
+      if (pageNumber < 1 || pageNumber > document.pages.length) continue;
+      final page = document.pages[pageNumber - 1];
+      final quads = [
+        for (final fragment in range.enumerateFragmentBoundingRects())
+          normalizedRectFromPdfRect(
+            fragment.bounds,
+            pageWidth: page.width,
+            pageHeight: page.height,
+          ),
+      ];
+      if (quads.isEmpty) continue;
+      final node = buildAnnotationNode(
+        kind: kind,
+        boardId: board.id,
+        bookId: widget.book.id,
+        page: pageNumber,
+        quads: quads,
+        sourceText: range.text,
+        style: style,
+      );
+      ref.read(graphNodesProvider.notifier).upsert(node);
+    }
+
+    if (_controller.isReady) {
+      await _controller.textSelectionDelegate.clearTextSelection();
+    }
+    if (mounted) setState(() => _textSelection = null);
+  }
+
+  /// Selects annotation [node] (via [AnnotationOverlay]'s tap handler),
+  /// switching [AnnotationToolbar] into
+  /// [AnnotationToolbarMode.select] and pre-selecting its current color so a
+  /// follow-up swatch tap only changes color if the user actually picks a
+  /// different one.
+  void _onAnnotationTap(GraphNode node) {
+    if (!mounted) return;
+    setState(() {
+      _selectedAnnotationId = node.id;
+      final index = kAnnotationColors.indexOf(node.style.color ?? -1);
+      if (index != -1) _selectedColorIndex = index;
+    });
+  }
+
+  void _deleteSelectedAnnotation() {
+    final id = _selectedAnnotationId;
+    if (id == null) return;
+    ref.read(graphNodesProvider.notifier).remove(id);
+    setState(() => _selectedAnnotationId = null);
+  }
+
+  /// Re-tags the selected annotation with [colorIndex]'s color, keeping the
+  /// kind-dependent opacity/stroke-width [annotationStyle] already assigns
+  /// it (a highlight stays translucent, an underline stays a thin opaque
+  /// stroke) — only the color itself changes.
+  void _recolorSelectedAnnotation(int colorIndex) {
+    final id = _selectedAnnotationId;
+    if (id == null) return;
+    GraphNode? node;
+    for (final n in ref.read(graphNodesProvider)) {
+      if (n.id == id) {
+        node = n;
+        break;
+      }
+    }
+    if (node == null) return;
+    final color = kAnnotationColors[colorIndex];
+    ref
+        .read(graphNodesProvider.notifier)
+        .upsert(
+          node.copyWith(
+            style: annotationStyle(node.kind, color),
+            updatedAt: DateTime.now(),
+          ),
+        );
+    setState(() => _selectedColorIndex = colorIndex);
+  }
+
+  /// Handles a swatch tap in either [AnnotationToolbar] mode: while an
+  /// annotation is selected it recolors that annotation; otherwise it just
+  /// changes which color a *new* annotation will be created with.
+  void _onColorTap(int index) {
+    if (_selectedAnnotationId != null) {
+      _recolorSelectedAnnotation(index);
+    } else {
+      setState(() => _selectedColorIndex = index);
+    }
+  }
+
+  void _closeAnnotationSelection() {
+    setState(() => _selectedAnnotationId = null);
   }
 
   Future<void> _toggleImmersive() async {
@@ -276,6 +445,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   children: [
                     Column(
                       children: [
+                        if (!_immersive)
+                          AnnotationToolbar(
+                            mode: _selectedAnnotationId != null
+                                ? AnnotationToolbarMode.select
+                                : AnnotationToolbarMode.create,
+                            selectedColorIndex: _selectedColorIndex,
+                            onColorTap: _onColorTap,
+                            canCreate: _textSelection?.hasSelectedText ?? false,
+                            onHighlight: () =>
+                                unawaited(_createAnnotation(NodeKind.highlight)),
+                            onUnderline: () =>
+                                unawaited(_createAnnotation(NodeKind.underline)),
+                            onDelete: _deleteSelectedAnnotation,
+                            onClose: _closeAnnotationSelection,
+                          ),
                         Expanded(
                           child: _PdfSurface(
                             source: source,
@@ -285,6 +469,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                                 ? 1
                                 : widget.book.currentPage,
                             onViewerReady: _onViewerReady,
+                            bookId: widget.book.id,
+                            onSelectionChange: _onTextSelectionChange,
+                            onAnnotationTap: _onAnnotationTap,
                           ),
                         ),
                         if (!_immersive) PaginationBar(controller: _controller),
@@ -319,6 +506,9 @@ class _PdfSurface extends StatelessWidget {
     required this.isHorizontal,
     required this.initialPageNumber,
     required this.onViewerReady,
+    required this.bookId,
+    required this.onSelectionChange,
+    required this.onAnnotationTap,
   });
 
   final PdfSource source;
@@ -326,6 +516,12 @@ class _PdfSurface extends StatelessWidget {
   final bool isHorizontal;
   final int initialPageNumber;
   final PdfViewerReadyCallback onViewerReady;
+
+  /// See `_ReaderScreenState`'s doc — used to filter [AnnotationOverlay] to
+  /// this one book's highlights/underlines.
+  final String bookId;
+  final PdfViewerTextSelectionChangeCallback onSelectionChange;
+  final ValueChanged<GraphNode> onAnnotationTap;
 
   @override
   Widget build(BuildContext context) {
@@ -347,6 +543,20 @@ class _PdfSurface extends StatelessWidget {
           ),
         ),
       ),
+      textSelectionParams: PdfTextSelectionParams(
+        onTextSelectionChange: onSelectionChange,
+      ),
+      // Renders this book's highlights/underlines on top of each page — see
+      // AnnotationOverlay's doc for why it's a self-watching ConsumerWidget
+      // rather than this closure itself reading graphNodesProvider.
+      pageOverlaysBuilder: (context, pageRectInViewer, page) => [
+        AnnotationOverlay(
+          bookId: bookId,
+          page: page,
+          pageRectInViewer: pageRectInViewer,
+          onAnnotationTap: onAnnotationTap,
+        ),
+      ],
     );
 
     final assetPath = source.assetPath;
