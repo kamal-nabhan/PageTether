@@ -63,7 +63,8 @@ class AnnotationOverlay extends ConsumerWidget {
         if ((node.kind == NodeKind.highlight ||
                 node.kind == NodeKind.underline) &&
             node.anchor?.bookId == bookId &&
-            node.anchor?.page == pageNumber)
+            node.anchor?.page == pageNumber &&
+            !node.deleted)
           node,
     ];
     if (relevant.isEmpty) return const SizedBox.shrink();

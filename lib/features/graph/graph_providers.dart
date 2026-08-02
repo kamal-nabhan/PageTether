@@ -36,7 +36,10 @@ class BoardsNotifier extends Notifier<List<Board>> {
   void upsert(Board board) {
     final exists = state.any((b) => b.id == board.id);
     state = exists
-        ? [for (final b in state) if (b.id == board.id) board else b]
+        ? [
+            for (final b in state)
+              if (b.id == board.id) board else b,
+          ]
         : [...state, board];
     unawaited(_store.upsertBoard(board));
   }
@@ -49,7 +52,10 @@ class BoardsNotifier extends Notifier<List<Board>> {
   /// `LibraryNotifier.removeCollectionFromAllBooks`.
   void remove(String id) {
     if (!state.any((b) => b.id == id)) return;
-    state = [for (final b in state) if (b.id != id) b];
+    state = [
+      for (final b in state)
+        if (b.id != id) b,
+    ];
     unawaited(_store.removeBoard(id));
   }
 
@@ -139,7 +145,10 @@ class GraphNodesNotifier extends Notifier<List<GraphNode>> {
   void upsert(GraphNode node) {
     final exists = state.any((n) => n.id == node.id);
     state = exists
-        ? [for (final n in state) if (n.id == node.id) node else n]
+        ? [
+            for (final n in state)
+              if (n.id == node.id) node else n,
+          ]
         : [...state, node];
     unawaited(_store.upsertNode(node));
   }
@@ -147,17 +156,58 @@ class GraphNodesNotifier extends Notifier<List<GraphNode>> {
   /// Removes node [id]. No-op if it isn't known. Deliberately does not
   /// cascade to edges referencing it — see [BoardsNotifier.remove]'s doc for
   /// why cascades are left to the caller.
+  ///
+  /// This is a hard, local-only drop — it never reaches Supabase (see
+  /// `SyncEngine.pushNodes`, which only ever upserts nodes still present
+  /// locally), so on another device — or on this one after the next pull —
+  /// the node simply comes back. Reserved for the future board-cascade case
+  /// (deleting a whole board and everything on it, mirroring
+  /// [BoardsNotifier.remove]'s doc) where the board itself disappearing is
+  /// what's meant to propagate. For deleting a single annotation, see
+  /// [setDeleted] instead.
   void remove(String id) {
     if (!state.any((n) => n.id == id)) return;
-    state = [for (final n in state) if (n.id != id) n];
+    state = [
+      for (final n in state)
+        if (n.id != id) n,
+    ];
     unawaited(_store.removeNode(id));
+  }
+
+  /// Tombstones node [id] — sets [GraphNode.deleted] (via [upsert], so it
+  /// persists and keeps the usual last-write-wins semantics) rather than
+  /// dropping the node outright. This is the delete path that actually
+  /// propagates through sync: [remove] is a hard local-only drop that
+  /// `pushNodes` never sees once the node is gone, so a device that already
+  /// pulled it would never learn it was deleted. Setting [deleted] true
+  /// instead keeps the row alive as a tombstone that upserts like any other
+  /// edit — see [GraphNode]'s class doc and [mergeRemoteNodes]. No-op if
+  /// [id] isn't known. Pass `deleted: false` to undo a delete (e.g. a
+  /// snackbar Undo) — that still bumps `updatedAt`, so the un-delete itself
+  /// wins last-write-wins on other devices too.
+  void setDeleted(String id, bool deleted) {
+    GraphNode? node;
+    for (final n in state) {
+      if (n.id == id) {
+        node = n;
+        break;
+      }
+    }
+    if (node == null) return;
+    upsert(node.copyWith(deleted: deleted, updatedAt: DateTime.now()));
   }
 
   /// Every node whose [GraphNode.boardId] is [boardId], in [upsert] order.
   void removeForBoard(String boardId) {
-    final toRemove = [for (final n in state) if (n.boardId == boardId) n.id];
+    final toRemove = [
+      for (final n in state)
+        if (n.boardId == boardId) n.id,
+    ];
     if (toRemove.isEmpty) return;
-    state = [for (final n in state) if (n.boardId != boardId) n];
+    state = [
+      for (final n in state)
+        if (n.boardId != boardId) n,
+    ];
     for (final id in toRemove) {
       unawaited(_store.removeNode(id));
     }
@@ -170,7 +220,11 @@ class GraphNodesNotifier extends Notifier<List<GraphNode>> {
   /// no `created_at` column): a newly-added node's `createdAt` is set to the
   /// remote row's `updatedAt` (the best available approximation), while an
   /// updated node keeps its existing local `createdAt` untouched via
-  /// [GraphNode.copyWith]. Returns how many nodes were added vs. updated.
+  /// [GraphNode.copyWith]. [GraphNode.deleted] is carried through like any
+  /// other field, which is what makes a tombstone from another device
+  /// (a delete via [setDeleted]) win here and hide the node locally too —
+  /// see [GraphNode]'s class doc. Returns how many nodes were added vs.
+  /// updated.
   ({int added, int updated}) mergeRemoteNodes(
     List<SyncedGraphNode> remoteNodes,
   ) {
@@ -196,6 +250,7 @@ class GraphNodesNotifier extends Notifier<List<GraphNode>> {
           anchor: remote.anchor,
           contentText: remote.contentText,
           badge: remote.badge,
+          deleted: remote.deleted,
           createdAt: remote.updatedAt,
           updatedAt: remote.updatedAt,
         );
@@ -217,6 +272,7 @@ class GraphNodesNotifier extends Notifier<List<GraphNode>> {
         anchor: remote.anchor,
         contentText: remote.contentText,
         badge: remote.badge,
+        deleted: remote.deleted,
         updatedAt: remote.updatedAt,
       );
       updated++;
@@ -229,9 +285,10 @@ class GraphNodesNotifier extends Notifier<List<GraphNode>> {
   }
 }
 
-final graphNodesProvider = NotifierProvider<GraphNodesNotifier, List<GraphNode>>(
-  GraphNodesNotifier.new,
-);
+final graphNodesProvider =
+    NotifierProvider<GraphNodesNotifier, List<GraphNode>>(
+      GraphNodesNotifier.new,
+    );
 
 /// Holds every persisted [GraphEdge], across every board. Seeded in
 /// `main()` with `LibraryStore.loadEdges()`'s result.
@@ -249,7 +306,10 @@ class GraphEdgesNotifier extends Notifier<List<GraphEdge>> {
   void upsert(GraphEdge edge) {
     final exists = state.any((e) => e.id == edge.id);
     state = exists
-        ? [for (final e in state) if (e.id == edge.id) edge else e]
+        ? [
+            for (final e in state)
+              if (e.id == edge.id) edge else e,
+          ]
         : [...state, edge];
     unawaited(_store.upsertEdge(edge));
   }
@@ -257,16 +317,25 @@ class GraphEdgesNotifier extends Notifier<List<GraphEdge>> {
   /// Removes edge [id]. No-op if it isn't known.
   void remove(String id) {
     if (!state.any((e) => e.id == id)) return;
-    state = [for (final e in state) if (e.id != id) e];
+    state = [
+      for (final e in state)
+        if (e.id != id) e,
+    ];
     unawaited(_store.removeEdge(id));
   }
 
   /// Every edge whose [GraphEdge.boardId] is [boardId] — see
   /// [GraphNodesNotifier.removeForBoard]'s doc.
   void removeForBoard(String boardId) {
-    final toRemove = [for (final e in state) if (e.boardId == boardId) e.id];
+    final toRemove = [
+      for (final e in state)
+        if (e.boardId == boardId) e.id,
+    ];
     if (toRemove.isEmpty) return;
-    state = [for (final e in state) if (e.boardId != boardId) e];
+    state = [
+      for (final e in state)
+        if (e.boardId != boardId) e,
+    ];
     for (final id in toRemove) {
       unawaited(_store.removeEdge(id));
     }
@@ -322,6 +391,7 @@ class GraphEdgesNotifier extends Notifier<List<GraphEdge>> {
   }
 }
 
-final graphEdgesProvider = NotifierProvider<GraphEdgesNotifier, List<GraphEdge>>(
-  GraphEdgesNotifier.new,
-);
+final graphEdgesProvider =
+    NotifierProvider<GraphEdgesNotifier, List<GraphEdge>>(
+      GraphEdgesNotifier.new,
+    );

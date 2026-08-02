@@ -168,6 +168,12 @@ class SyncedBoard {
 /// in `schema.sql`); merging a remote row back into a local [GraphNode]
 /// therefore always keeps the local `createdAt` (see
 /// `GraphNodesNotifier.mergeRemoteNodes`).
+///
+/// [deleted] carries [GraphNode.deleted] — a deleted node is never dropped
+/// from `pt_nodes` by row deletion (there is no delete path anywhere in this
+/// class); instead the tombstone rides along as an ordinary column and
+/// propagates via the same last-write-wins upsert every other field does.
+/// See [GraphNode]'s class doc.
 class SyncedGraphNode {
   const SyncedGraphNode({
     required this.id,
@@ -184,6 +190,7 @@ class SyncedGraphNode {
     required this.anchor,
     required this.contentText,
     required this.badge,
+    required this.deleted,
     required this.updatedAt,
   });
 
@@ -201,6 +208,7 @@ class SyncedGraphNode {
   final NodeAnchor? anchor;
   final String contentText;
   final String? badge;
+  final bool deleted;
   final DateTime updatedAt;
 
   factory SyncedGraphNode.fromNode(GraphNode node) => SyncedGraphNode(
@@ -218,30 +226,31 @@ class SyncedGraphNode {
     anchor: node.anchor,
     contentText: node.contentText,
     badge: node.badge,
+    deleted: node.deleted,
     updatedAt: node.updatedAt,
   );
 
-  factory SyncedGraphNode.fromRow(Map<String, dynamic> row) =>
-      SyncedGraphNode(
-        id: row['id'] as String,
-        boardId: row['board_id'] as String? ?? '',
-        kind: NodeKind.values.firstWhere(
-          (k) => k.name == row['kind'],
-          orElse: () => NodeKind.textNote,
-        ),
-        x: (row['x'] as num?)?.toDouble() ?? 0,
-        y: (row['y'] as num?)?.toDouble() ?? 0,
-        w: (row['w'] as num?)?.toDouble() ?? 0,
-        h: (row['h'] as num?)?.toDouble() ?? 0,
-        rotation: (row['rotation'] as num?)?.toDouble() ?? 0,
-        z: (row['z'] as num?)?.toDouble() ?? 0,
-        style: GraphStyle.fromJson(row['style'] as Map<String, dynamic>?),
-        content: NodeContent.fromJson(row['content'] as Map<String, dynamic>?),
-        anchor: NodeAnchor.fromJson(row['anchor'] as Map<String, dynamic>?),
-        contentText: row['content_text'] as String? ?? '',
-        badge: row['badge'] as String?,
-        updatedAt: _parseTimestamp(row['updated_at']),
-      );
+  factory SyncedGraphNode.fromRow(Map<String, dynamic> row) => SyncedGraphNode(
+    id: row['id'] as String,
+    boardId: row['board_id'] as String? ?? '',
+    kind: NodeKind.values.firstWhere(
+      (k) => k.name == row['kind'],
+      orElse: () => NodeKind.textNote,
+    ),
+    x: (row['x'] as num?)?.toDouble() ?? 0,
+    y: (row['y'] as num?)?.toDouble() ?? 0,
+    w: (row['w'] as num?)?.toDouble() ?? 0,
+    h: (row['h'] as num?)?.toDouble() ?? 0,
+    rotation: (row['rotation'] as num?)?.toDouble() ?? 0,
+    z: (row['z'] as num?)?.toDouble() ?? 0,
+    style: GraphStyle.fromJson(row['style'] as Map<String, dynamic>?),
+    content: NodeContent.fromJson(row['content'] as Map<String, dynamic>?),
+    anchor: NodeAnchor.fromJson(row['anchor'] as Map<String, dynamic>?),
+    contentText: row['content_text'] as String? ?? '',
+    badge: row['badge'] as String?,
+    deleted: row['deleted'] as bool? ?? false,
+    updatedAt: _parseTimestamp(row['updated_at']),
+  );
 
   Map<String, dynamic> toRow(String userId) => {
     'user_id': userId,
@@ -259,6 +268,7 @@ class SyncedGraphNode {
     'anchor': anchor?.toJson(),
     'content_text': contentText,
     'badge': badge,
+    'deleted': deleted,
     'updated_at': updatedAt.toUtc().toIso8601String(),
   };
 }
@@ -296,20 +306,19 @@ class SyncedGraphEdge {
     updatedAt: edge.updatedAt,
   );
 
-  factory SyncedGraphEdge.fromRow(Map<String, dynamic> row) =>
-      SyncedGraphEdge(
-        id: row['id'] as String,
-        boardId: row['board_id'] as String? ?? '',
-        fromNodeId: row['from_node_id'] as String? ?? '',
-        toNodeId: row['to_node_id'] as String? ?? '',
-        kind: EdgeKind.values.firstWhere(
-          (k) => k.name == row['kind'],
-          orElse: () => EdgeKind.arrow,
-        ),
-        label: row['label'] as String?,
-        style: GraphStyle.fromJson(row['style'] as Map<String, dynamic>?),
-        updatedAt: _parseTimestamp(row['updated_at']),
-      );
+  factory SyncedGraphEdge.fromRow(Map<String, dynamic> row) => SyncedGraphEdge(
+    id: row['id'] as String,
+    boardId: row['board_id'] as String? ?? '',
+    fromNodeId: row['from_node_id'] as String? ?? '',
+    toNodeId: row['to_node_id'] as String? ?? '',
+    kind: EdgeKind.values.firstWhere(
+      (k) => k.name == row['kind'],
+      orElse: () => EdgeKind.arrow,
+    ),
+    label: row['label'] as String?,
+    style: GraphStyle.fromJson(row['style'] as Map<String, dynamic>?),
+    updatedAt: _parseTimestamp(row['updated_at']),
+  );
 
   Map<String, dynamic> toRow(String userId) => {
     'user_id': userId,
@@ -484,7 +493,10 @@ class SyncEngine {
 
   /// Every `pt_boards` row belonging to [userId].
   Future<List<SyncedBoard>> pullBoards(String userId) async {
-    final rows = await _client.from(_boardsTable).select().eq('user_id', userId);
+    final rows = await _client
+        .from(_boardsTable)
+        .select()
+        .eq('user_id', userId);
     return [for (final row in rows) SyncedBoard.fromRow(row)];
   }
 

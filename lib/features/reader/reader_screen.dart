@@ -97,6 +97,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// [_onReaderPointerActivity].
   static const _controlsHideDelay = Duration(milliseconds: 2500);
 
+  /// How far the delete-undo [SnackBar] floats above the very bottom of the
+  /// screen — see [_deleteAnnotationWithUndo]. A default bottom-pinned
+  /// `SnackBar` collides with [PaginationBar] and [_FloatingControlBar]; this
+  /// clears both by roughly matching the floating control bar's own `bottom`
+  /// offset (see its `Positioned` in [build]) plus its height, so the
+  /// snackbar sits just above it instead of underneath/behind it. Two values
+  /// because the control bar itself sits lower in immersive mode (no
+  /// [PaginationBar] underneath it to clear).
+  double get _snackBarBottomMargin => _immersive ? 88 : 148;
+
   Timer? _dwellPushTimer;
   Timer? _pullTimer;
   Timer? _controlsHideTimer;
@@ -396,22 +406,40 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   /// Deletes [node] immediately (local + instant — annotation deletion isn't
-  /// a network round-trip, see the class doc's "Annotation sync" paragraph),
-  /// then offers a 5s [SnackBar] Undo that simply re-`upsert`s the captured
-  /// node — cheap to do since [GraphNode] is an immutable value already
-  /// fully in hand from the tap that opened the popover.
+  /// a network round-trip, see the class doc's "Annotation sync" paragraph)
+  /// by tombstoning it via [GraphNodesNotifier.setDeleted] rather than a hard
+  /// [GraphNodesNotifier.remove] — see that method's doc for why only a
+  /// tombstone actually propagates a delete through sync (a hard local
+  /// removal just comes back on the next pull, since `pushNodes` only ever
+  /// upserts nodes still present locally).
+  ///
+  /// Then offers a floating 6s [SnackBar] Undo (see
+  /// [_snackBarBottomMargin]'s doc for why it floats instead of pinning to
+  /// the very bottom) whose action un-tombstones by id — `setDeleted(node.id,
+  /// false)`, not a re-`upsert` of the [GraphNode] captured at tap time —
+  /// since going through [GraphNodesNotifier.setDeleted] again stamps a
+  /// fresh `updatedAt`, so the undo itself also wins last-write-wins on other
+  /// devices, not just locally.
   void _deleteAnnotationWithUndo(GraphNode node) {
-    ref.read(graphNodesProvider.notifier).remove(node.id);
+    ref.read(graphNodesProvider.notifier).setDeleted(node.id, true);
     final label = node.kind == NodeKind.highlight ? 'Highlight' : 'Underline';
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
           content: Text('$label deleted'),
-          duration: const Duration(seconds: 5),
+          duration: const Duration(seconds: 6),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            bottom: _snackBarBottomMargin,
+          ),
           action: SnackBarAction(
             label: 'Undo',
-            onPressed: () => ref.read(graphNodesProvider.notifier).upsert(node),
+            onPressed: () => ref
+                .read(graphNodesProvider.notifier)
+                .setDeleted(node.id, false),
           ),
         ),
       );

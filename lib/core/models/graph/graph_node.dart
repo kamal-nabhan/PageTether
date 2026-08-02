@@ -19,6 +19,16 @@ import 'node_kind.dart';
 /// [content] identically). Persisted locally via `LibraryStore` under
 /// `pt.nodes.v1` and synced via `SyncEngine.pushNodes`/`pullNodes` against
 /// the `pt_nodes` table (see `schema.sql`).
+///
+/// [deleted] makes a node's removal itself a synced, last-write-wins field
+/// rather than a row deletion: the sync layer has no tombstone-by-row-delete
+/// mechanism (`pushNodes` only ever upserts), so a node "deleted" by simply
+/// dropping it locally would silently come back on the next pull and the
+/// remote row would never be cleaned up. Setting [deleted] true instead (see
+/// `GraphNodesNotifier.setDeleted`) keeps the row around as a tombstone that
+/// propagates like any other edit — see `GraphNodesNotifier.mergeRemoteNodes`
+/// for the remote side, and `AnnotationOverlay` for where deleted nodes are
+/// filtered back out of the UI.
 @immutable
 class GraphNode {
   GraphNode({
@@ -36,6 +46,7 @@ class GraphNode {
     this.anchor,
     this.contentText = '',
     this.badge,
+    this.deleted = false,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) : createdAt = createdAt ?? updatedAt ?? DateTime.now(),
@@ -89,6 +100,11 @@ class GraphNode {
   /// highlight "TODO").
   final String? badge;
 
+  /// Tombstone flag — true means this node has been deleted and is kept
+  /// around only so that deletion propagates through sync. See the class
+  /// doc comment.
+  final bool deleted;
+
   final DateTime createdAt;
 
   /// Last-write-wins clock for sync — see `SyncEngine.pushNodes`/
@@ -109,6 +125,7 @@ class GraphNode {
     NodeAnchor? anchor,
     String? contentText,
     String? badge,
+    bool? deleted,
     DateTime? updatedAt,
   }) => GraphNode(
     id: id,
@@ -125,6 +142,7 @@ class GraphNode {
     anchor: anchor ?? this.anchor,
     contentText: contentText ?? this.contentText,
     badge: badge ?? this.badge,
+    deleted: deleted ?? this.deleted,
     createdAt: createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );
@@ -144,6 +162,7 @@ class GraphNode {
     'anchor': anchor?.toJson(),
     'contentText': contentText,
     'badge': badge,
+    'deleted': deleted,
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
   };
@@ -176,6 +195,7 @@ class GraphNode {
       anchor: NodeAnchor.fromJson(json['anchor'] as Map<String, dynamic>?),
       contentText: json['contentText'] as String? ?? '',
       badge: json['badge'] as String?,
+      deleted: json['deleted'] as bool? ?? false,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );
