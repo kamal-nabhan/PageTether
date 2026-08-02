@@ -52,9 +52,9 @@ void main() {
         isDefaultForBook: true,
         updatedAt: DateTime.utc(2026, 1, 1),
       );
-      final result = container
-          .read(boardsProvider.notifier)
-          .mergeRemoteBoards([remote]);
+      final result = container.read(boardsProvider.notifier).mergeRemoteBoards([
+        remote,
+      ]);
 
       expect(result, (added: 1, updated: 0));
       final board = container.read(boardsProvider).single;
@@ -63,29 +63,32 @@ void main() {
       expect(board.isDefaultForBook, isTrue);
     });
 
-    test('keeps the local copy when local.updatedAt is strictly newer', () async {
-      final local = Board(
-        id: 'b1',
-        title: 'Local title',
-        updatedAt: DateTime.utc(2026, 6, 1),
-      );
-      final container = await _container(boards: [local]);
-      addTearDown(container.dispose);
+    test(
+      'keeps the local copy when local.updatedAt is strictly newer',
+      () async {
+        final local = Board(
+          id: 'b1',
+          title: 'Local title',
+          updatedAt: DateTime.utc(2026, 6, 1),
+        );
+        final container = await _container(boards: [local]);
+        addTearDown(container.dispose);
 
-      final remote = SyncedBoard(
-        id: 'b1',
-        title: 'Stale remote',
-        bookId: null,
-        isDefaultForBook: false,
-        updatedAt: DateTime.utc(2026, 1, 1),
-      );
-      final result = container
-          .read(boardsProvider.notifier)
-          .mergeRemoteBoards([remote]);
+        final remote = SyncedBoard(
+          id: 'b1',
+          title: 'Stale remote',
+          bookId: null,
+          isDefaultForBook: false,
+          updatedAt: DateTime.utc(2026, 1, 1),
+        );
+        final result = container
+            .read(boardsProvider.notifier)
+            .mergeRemoteBoards([remote]);
 
-      expect(result, (added: 0, updated: 0));
-      expect(container.read(boardsProvider).single.title, 'Local title');
-    });
+        expect(result, (added: 0, updated: 0));
+        expect(container.read(boardsProvider).single.title, 'Local title');
+      },
+    );
 
     test('keeps the local copy when timestamps are exactly equal', () async {
       final same = DateTime.utc(2026, 3, 1);
@@ -100,44 +103,51 @@ void main() {
         isDefaultForBook: false,
         updatedAt: same,
       );
-      final result = container
-          .read(boardsProvider.notifier)
-          .mergeRemoteBoards([remote]);
+      final result = container.read(boardsProvider.notifier).mergeRemoteBoards([
+        remote,
+      ]);
 
       expect(result, (added: 0, updated: 0));
       expect(container.read(boardsProvider).single.title, 'Local');
     });
 
-    test('adopts the remote row when it is strictly newer than local', () async {
-      final local = Board(
-        id: 'b1',
-        title: 'Old title',
-        updatedAt: DateTime.utc(2026, 1, 1),
-      );
-      final container = await _container(boards: [local]);
-      addTearDown(container.dispose);
+    test(
+      'adopts the remote row when it is strictly newer than local',
+      () async {
+        final local = Board(
+          id: 'b1',
+          title: 'Old title',
+          updatedAt: DateTime.utc(2026, 1, 1),
+        );
+        final container = await _container(boards: [local]);
+        addTearDown(container.dispose);
 
-      final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
-      final remote = SyncedBoard(
-        id: 'b1',
-        title: 'New title from another device',
-        bookId: 'book-2',
-        isDefaultForBook: true,
-        updatedAt: remoteUpdatedAt,
-      );
-      final result = container
-          .read(boardsProvider.notifier)
-          .mergeRemoteBoards([remote]);
+        final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
+        final remote = SyncedBoard(
+          id: 'b1',
+          title: 'New title from another device',
+          bookId: 'book-2',
+          isDefaultForBook: true,
+          updatedAt: remoteUpdatedAt,
+        );
+        final result = container
+            .read(boardsProvider.notifier)
+            .mergeRemoteBoards([remote]);
 
-      expect(result, (added: 0, updated: 1));
-      final board = container.read(boardsProvider).single;
-      expect(board.title, 'New title from another device');
-      expect(board.bookId, 'book-2');
-      expect(board.updatedAt, remoteUpdatedAt);
-    });
+        expect(result, (added: 0, updated: 1));
+        final board = container.read(boardsProvider).single;
+        expect(board.title, 'New title from another device');
+        expect(board.bookId, 'book-2');
+        expect(board.updatedAt, remoteUpdatedAt);
+      },
+    );
 
     test('is a no-op when remoteBoards is empty', () async {
-      final local = Board(id: 'b1', title: 'Local', updatedAt: DateTime.utc(2026, 1, 1));
+      final local = Board(
+        id: 'b1',
+        title: 'Local',
+        updatedAt: DateTime.utc(2026, 1, 1),
+      );
       final container = await _container(boards: [local]);
       addTearDown(container.dispose);
 
@@ -154,6 +164,7 @@ void main() {
       required DateTime updatedAt,
       String contentText = 'remote text',
       NodeKind kind = NodeKind.textNote,
+      bool deleted = false,
     }) => SyncedGraphNode(
       id: id,
       boardId: 'board-1',
@@ -169,6 +180,7 @@ void main() {
       anchor: null,
       contentText: contentText,
       badge: null,
+      deleted: deleted,
       updatedAt: updatedAt,
     );
 
@@ -189,64 +201,73 @@ void main() {
       expect(node.createdAt, remote.updatedAt);
     });
 
-    test('keeps the local copy when local.updatedAt is strictly newer', () async {
-      final local = GraphNode(
-        id: 'n1',
-        boardId: 'board-1',
-        kind: NodeKind.textNote,
-        contentText: 'local text',
-        createdAt: DateTime.utc(2025, 1, 1),
-        updatedAt: DateTime.utc(2026, 6, 1),
-      );
-      final container = await _container(nodes: [local]);
-      addTearDown(container.dispose);
+    test(
+      'keeps the local copy when local.updatedAt is strictly newer',
+      () async {
+        final local = GraphNode(
+          id: 'n1',
+          boardId: 'board-1',
+          kind: NodeKind.textNote,
+          contentText: 'local text',
+          createdAt: DateTime.utc(2025, 1, 1),
+          updatedAt: DateTime.utc(2026, 6, 1),
+        );
+        final container = await _container(nodes: [local]);
+        addTearDown(container.dispose);
 
-      final remote = remoteNode(
-        id: 'n1',
-        updatedAt: DateTime.utc(2026, 1, 1),
-        contentText: 'stale remote text',
-      );
-      final result = container
-          .read(graphNodesProvider.notifier)
-          .mergeRemoteNodes([remote]);
+        final remote = remoteNode(
+          id: 'n1',
+          updatedAt: DateTime.utc(2026, 1, 1),
+          contentText: 'stale remote text',
+        );
+        final result = container
+            .read(graphNodesProvider.notifier)
+            .mergeRemoteNodes([remote]);
 
-      expect(result, (added: 0, updated: 0));
-      expect(container.read(graphNodesProvider).single.contentText, 'local text');
-    });
+        expect(result, (added: 0, updated: 0));
+        expect(
+          container.read(graphNodesProvider).single.contentText,
+          'local text',
+        );
+      },
+    );
 
-    test('adopts the remote row when strictly newer, preserving local createdAt', () async {
-      final localCreatedAt = DateTime.utc(2025, 1, 1);
-      final local = GraphNode(
-        id: 'n1',
-        boardId: 'board-1',
-        kind: NodeKind.textNote,
-        contentText: 'old text',
-        createdAt: localCreatedAt,
-        updatedAt: DateTime.utc(2026, 1, 1),
-      );
-      final container = await _container(nodes: [local]);
-      addTearDown(container.dispose);
+    test(
+      'adopts the remote row when strictly newer, preserving local createdAt',
+      () async {
+        final localCreatedAt = DateTime.utc(2025, 1, 1);
+        final local = GraphNode(
+          id: 'n1',
+          boardId: 'board-1',
+          kind: NodeKind.textNote,
+          contentText: 'old text',
+          createdAt: localCreatedAt,
+          updatedAt: DateTime.utc(2026, 1, 1),
+        );
+        final container = await _container(nodes: [local]);
+        addTearDown(container.dispose);
 
-      final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
-      final remote = remoteNode(
-        id: 'n1',
-        updatedAt: remoteUpdatedAt,
-        contentText: 'new text from another device',
-        kind: NodeKind.highlight,
-      );
-      final result = container
-          .read(graphNodesProvider.notifier)
-          .mergeRemoteNodes([remote]);
+        final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
+        final remote = remoteNode(
+          id: 'n1',
+          updatedAt: remoteUpdatedAt,
+          contentText: 'new text from another device',
+          kind: NodeKind.highlight,
+        );
+        final result = container
+            .read(graphNodesProvider.notifier)
+            .mergeRemoteNodes([remote]);
 
-      expect(result, (added: 0, updated: 1));
-      final node = container.read(graphNodesProvider).single;
-      expect(node.contentText, 'new text from another device');
-      expect(node.kind, NodeKind.highlight);
-      expect(node.updatedAt, remoteUpdatedAt);
-      // createdAt is a purely local concept the merge never overwrites for
-      // an already-known node.
-      expect(node.createdAt, localCreatedAt);
-    });
+        expect(result, (added: 0, updated: 1));
+        final node = container.read(graphNodesProvider).single;
+        expect(node.contentText, 'new text from another device');
+        expect(node.kind, NodeKind.highlight);
+        expect(node.updatedAt, remoteUpdatedAt);
+        // createdAt is a purely local concept the merge never overwrites for
+        // an already-known node.
+        expect(node.createdAt, localCreatedAt);
+      },
+    );
 
     test('is a no-op when remoteNodes is empty', () async {
       final container = await _container();
@@ -256,6 +277,42 @@ void main() {
           .mergeRemoteNodes(const []);
       expect(result, (added: 0, updated: 0));
     });
+
+    test(
+      'adopts a newer remote tombstone, hiding the node locally too',
+      () async {
+        // The delete-propagation path: another device tombstoned this node
+        // (deleted: true) more recently than this device's local copy — the
+        // merge must adopt that like any other newer field, which is what
+        // makes a remote delete actually take effect here. See GraphNode's
+        // class doc and GraphNodesNotifier.setDeleted.
+        final local = GraphNode(
+          id: 'n1',
+          boardId: 'board-1',
+          kind: NodeKind.highlight,
+          contentText: 'still here locally',
+          createdAt: DateTime.utc(2025, 1, 1),
+          updatedAt: DateTime.utc(2026, 1, 1),
+        );
+        final container = await _container(nodes: [local]);
+        addTearDown(container.dispose);
+
+        final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
+        final remote = remoteNode(
+          id: 'n1',
+          updatedAt: remoteUpdatedAt,
+          deleted: true,
+        );
+        final result = container
+            .read(graphNodesProvider.notifier)
+            .mergeRemoteNodes([remote]);
+
+        expect(result, (added: 0, updated: 1));
+        final node = container.read(graphNodesProvider).single;
+        expect(node.deleted, isTrue);
+        expect(node.updatedAt, remoteUpdatedAt);
+      },
+    );
   });
 
   group('GraphEdgesNotifier.mergeRemoteEdges', () {
@@ -287,58 +344,64 @@ void main() {
       expect(container.read(graphEdgesProvider).single.label, 'remote label');
     });
 
-    test('keeps the local copy when local.updatedAt is strictly newer', () async {
-      final local = GraphEdge(
-        id: 'e1',
-        boardId: 'board-1',
-        fromNodeId: 'a',
-        toNodeId: 'b',
-        label: 'local label',
-        updatedAt: DateTime.utc(2026, 6, 1),
-      );
-      final container = await _container(edges: [local]);
-      addTearDown(container.dispose);
+    test(
+      'keeps the local copy when local.updatedAt is strictly newer',
+      () async {
+        final local = GraphEdge(
+          id: 'e1',
+          boardId: 'board-1',
+          fromNodeId: 'a',
+          toNodeId: 'b',
+          label: 'local label',
+          updatedAt: DateTime.utc(2026, 6, 1),
+        );
+        final container = await _container(edges: [local]);
+        addTearDown(container.dispose);
 
-      final remote = remoteEdge(
-        id: 'e1',
-        updatedAt: DateTime.utc(2026, 1, 1),
-        label: 'stale remote label',
-      );
-      final result = container
-          .read(graphEdgesProvider.notifier)
-          .mergeRemoteEdges([remote]);
+        final remote = remoteEdge(
+          id: 'e1',
+          updatedAt: DateTime.utc(2026, 1, 1),
+          label: 'stale remote label',
+        );
+        final result = container
+            .read(graphEdgesProvider.notifier)
+            .mergeRemoteEdges([remote]);
 
-      expect(result, (added: 0, updated: 0));
-      expect(container.read(graphEdgesProvider).single.label, 'local label');
-    });
+        expect(result, (added: 0, updated: 0));
+        expect(container.read(graphEdgesProvider).single.label, 'local label');
+      },
+    );
 
-    test('adopts the remote row when it is strictly newer than local', () async {
-      final local = GraphEdge(
-        id: 'e1',
-        boardId: 'board-1',
-        fromNodeId: 'a',
-        toNodeId: 'b',
-        label: 'old label',
-        updatedAt: DateTime.utc(2026, 1, 1),
-      );
-      final container = await _container(edges: [local]);
-      addTearDown(container.dispose);
+    test(
+      'adopts the remote row when it is strictly newer than local',
+      () async {
+        final local = GraphEdge(
+          id: 'e1',
+          boardId: 'board-1',
+          fromNodeId: 'a',
+          toNodeId: 'b',
+          label: 'old label',
+          updatedAt: DateTime.utc(2026, 1, 1),
+        );
+        final container = await _container(edges: [local]);
+        addTearDown(container.dispose);
 
-      final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
-      final remote = remoteEdge(
-        id: 'e1',
-        updatedAt: remoteUpdatedAt,
-        label: 'new label from another device',
-      );
-      final result = container
-          .read(graphEdgesProvider.notifier)
-          .mergeRemoteEdges([remote]);
+        final remoteUpdatedAt = DateTime.utc(2026, 2, 1);
+        final remote = remoteEdge(
+          id: 'e1',
+          updatedAt: remoteUpdatedAt,
+          label: 'new label from another device',
+        );
+        final result = container
+            .read(graphEdgesProvider.notifier)
+            .mergeRemoteEdges([remote]);
 
-      expect(result, (added: 0, updated: 1));
-      final edge = container.read(graphEdgesProvider).single;
-      expect(edge.label, 'new label from another device');
-      expect(edge.updatedAt, remoteUpdatedAt);
-    });
+        expect(result, (added: 0, updated: 1));
+        final edge = container.read(graphEdgesProvider).single;
+        expect(edge.label, 'new label from another device');
+        expect(edge.updatedAt, remoteUpdatedAt);
+      },
+    );
 
     test('is a no-op when remoteEdges is empty', () async {
       final container = await _container();

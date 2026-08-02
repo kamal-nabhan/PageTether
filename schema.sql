@@ -115,11 +115,18 @@ create table if not exists pt_nodes (
   anchor jsonb null,
   content_text text not null default '',
   badge text null,
+  deleted boolean not null default false,
   updated_at timestamptz not null default now(),
   primary key (user_id, id)
 );
 
 create index if not exists pt_nodes_user_board_idx on pt_nodes (user_id, board_id);
+
+-- Tombstone column for soft-deleted nodes (annotation deletes propagate via
+-- last-write-wins like any other field, rather than by removing the row).
+-- Separate ALTER so re-running this file on a project created before this
+-- column existed still adds it (create-table-if-not-exists won't).
+alter table pt_nodes add column if not exists deleted boolean not null default false;
 
 create table if not exists pt_edges (
   user_id text not null,

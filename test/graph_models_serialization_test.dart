@@ -157,6 +157,7 @@ void main() {
         ),
         contentText: 'source passage',
         badge: 'TODO',
+        deleted: false,
         createdAt: DateTime.utc(2026, 1, 1),
         updatedAt: DateTime.utc(2026, 2, 1),
       );
@@ -177,6 +178,7 @@ void main() {
       expect(decoded.anchor, node.anchor);
       expect(decoded.contentText, node.contentText);
       expect(decoded.badge, node.badge);
+      expect(decoded.deleted, node.deleted);
       expect(decoded.createdAt, node.createdAt);
       expect(decoded.updatedAt, node.updatedAt);
     });
@@ -198,6 +200,7 @@ void main() {
       expect(decoded.anchor, isNull);
       expect(decoded.contentText, '');
       expect(decoded.badge, isNull);
+      expect(decoded.deleted, isFalse);
     });
 
     test('fromJson never throws on an unrecognized kind', () {
@@ -206,6 +209,18 @@ void main() {
         'kind': 'someKindFromAFutureBuild',
       });
       expect(decoded.kind, NodeKind.textNote);
+    });
+
+    test('toJson/fromJson round-trips a tombstoned (deleted) node', () {
+      final node = GraphNode(
+        id: 'node-1',
+        boardId: 'board-1',
+        kind: NodeKind.highlight,
+        deleted: true,
+        updatedAt: DateTime.utc(2026, 3, 1),
+      );
+      final decoded = GraphNode.fromJson(node.toJson());
+      expect(decoded.deleted, isTrue);
     });
   });
 

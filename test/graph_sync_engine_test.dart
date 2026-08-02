@@ -118,22 +118,36 @@ void main() {
       expect(node.anchor, const NodeAnchor(bookId: 'book-1', page: 4));
       expect(node.contentText, 'source passage');
       expect(node.badge, 'TODO');
+      expect(node.deleted, isFalse);
       expect(node.updatedAt, DateTime.parse('2026-03-15T10:30:00.000Z'));
     });
 
-    test('fromRow defaults missing optional columns, unrecognized kind falls back', () {
+    test(
+      'fromRow defaults missing optional columns, unrecognized kind falls back',
+      () {
+        final node = SyncedGraphNode.fromRow({
+          'id': 'node-1',
+          'kind': 'someFutureKind',
+        });
+        expect(node.boardId, '');
+        expect(node.kind, NodeKind.textNote);
+        expect(node.x, 0);
+        expect(node.style, GraphStyle.empty);
+        expect(node.content, const EmptyNodeContent());
+        expect(node.anchor, isNull);
+        expect(node.contentText, '');
+        expect(node.badge, isNull);
+        expect(node.deleted, isFalse);
+      },
+    );
+
+    test('fromRow parses a tombstoned (deleted: true) row', () {
       final node = SyncedGraphNode.fromRow({
         'id': 'node-1',
-        'kind': 'someFutureKind',
+        'kind': 'highlight',
+        'deleted': true,
       });
-      expect(node.boardId, '');
-      expect(node.kind, NodeKind.textNote);
-      expect(node.x, 0);
-      expect(node.style, GraphStyle.empty);
-      expect(node.content, const EmptyNodeContent());
-      expect(node.anchor, isNull);
-      expect(node.contentText, '');
-      expect(node.badge, isNull);
+      expect(node.deleted, isTrue);
     });
 
     test('toRow produces exactly the pt_nodes columns from schema.sql', () {
@@ -148,10 +162,15 @@ void main() {
         rotation: 0,
         z: 0,
         style: GraphStyle.empty,
-        content: const VectorNodeContent(paths: [[0, 0, 1, 1]]),
+        content: const VectorNodeContent(
+          paths: [
+            [0, 0, 1, 1],
+          ],
+        ),
         anchor: null,
         contentText: '',
         badge: null,
+        deleted: false,
         updatedAt: DateTime.utc(2026, 1, 1),
       );
       final row = node.toRow('user-1');
@@ -172,10 +191,12 @@ void main() {
         'anchor',
         'content_text',
         'badge',
+        'deleted',
         'updated_at',
       });
       expect(row['kind'], 'ink');
       expect(row['anchor'], isNull);
+      expect(row['deleted'], isFalse);
     });
 
     test('round-trips through fromRow(toRow(...))', () {
@@ -200,6 +221,7 @@ void main() {
         ),
         contentText: 'clip text',
         badge: 'note',
+        deleted: false,
         updatedAt: DateTime.utc(2026, 1, 1),
       );
       final roundTripped = SyncedGraphNode.fromRow(original.toRow('user-1'));
@@ -213,6 +235,37 @@ void main() {
       expect(roundTripped.anchor, original.anchor);
       expect(roundTripped.contentText, original.contentText);
       expect(roundTripped.badge, original.badge);
+      expect(roundTripped.deleted, original.deleted);
+      expect(roundTripped.updatedAt, original.updatedAt);
+    });
+
+    test('round-trips a tombstoned node through fromRow(toRow(...))', () {
+      // Verifies the delete-propagation path end to end at the sync-row
+      // layer: a node tombstoned via GraphNodesNotifier.setDeleted (deleted:
+      // true) must still carry that flag through a push (toRow) and a pull
+      // (fromRow) unchanged, since that's exactly what lets the delete reach
+      // another device — see GraphNode's class doc.
+      final original = SyncedGraphNode(
+        id: 'node-3',
+        boardId: 'board-1',
+        kind: NodeKind.highlight,
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        rotation: 0,
+        z: 0,
+        style: GraphStyle.empty,
+        content: const EmptyNodeContent(),
+        anchor: null,
+        contentText: 'deleted highlight',
+        badge: null,
+        deleted: true,
+        updatedAt: DateTime.utc(2026, 4, 1),
+      );
+      final roundTripped = SyncedGraphNode.fromRow(original.toRow('user-1'));
+
+      expect(roundTripped.deleted, isTrue);
       expect(roundTripped.updatedAt, original.updatedAt);
     });
   });
@@ -242,18 +295,21 @@ void main() {
       expect(edge.updatedAt, DateTime.parse('2026-02-01T09:00:00.000Z'));
     });
 
-    test('fromRow defaults missing optional columns, unrecognized kind falls back', () {
-      final edge = SyncedGraphEdge.fromRow({
-        'id': 'edge-1',
-        'kind': 'someFutureKind',
-      });
-      expect(edge.boardId, '');
-      expect(edge.fromNodeId, '');
-      expect(edge.toNodeId, '');
-      expect(edge.kind, EdgeKind.arrow);
-      expect(edge.label, isNull);
-      expect(edge.style, GraphStyle.empty);
-    });
+    test(
+      'fromRow defaults missing optional columns, unrecognized kind falls back',
+      () {
+        final edge = SyncedGraphEdge.fromRow({
+          'id': 'edge-1',
+          'kind': 'someFutureKind',
+        });
+        expect(edge.boardId, '');
+        expect(edge.fromNodeId, '');
+        expect(edge.toNodeId, '');
+        expect(edge.kind, EdgeKind.arrow);
+        expect(edge.label, isNull);
+        expect(edge.style, GraphStyle.empty);
+      },
+    );
 
     test('toRow produces exactly the pt_edges columns from schema.sql', () {
       final edge = SyncedGraphEdge(
