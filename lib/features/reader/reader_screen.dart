@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart' show PointerEvent, kSecondaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,8 +20,9 @@ import '../library/library_providers.dart';
 import '../settings/settings_providers.dart';
 import 'annotation_geometry.dart';
 import 'pdf_layouts.dart';
+import 'widgets/annotation_actions_popover.dart';
 import 'widgets/annotation_overlay.dart';
-import 'widgets/annotation_toolbar.dart';
+import 'widgets/annotation_panel.dart';
 import 'widgets/pagination_bar.dart';
 
 /// Renders a single PDF with pdfrx.
@@ -42,13 +44,28 @@ import 'widgets/pagination_bar.dart';
 /// unless both [SyncCredentials.isConfigured] and
 /// [AuthStateSignedIn.canSync] — see [_ReaderScreenState._canSync].
 ///
+/// Annotation sync stays deliberately local-first and edit-silent (no push
+/// per highlight/delete/recolor — that would make every annotation edit a
+/// network round-trip): `dispose()` fires one silent [SyncNotifier.autoSync]
+/// on close so a session's annotations reach Supabase without the user
+/// having to think about it, and [AnnotationPanel]'s "Sync notes" button
+/// (via its nested sync button — see that file) offers an explicit manual
+/// push for anyone who wants it sooner (e.g. before switching devices
+/// mid-session).
+///
 /// Also owns the highlight/underline UI on top of pdfrx's text selection:
-/// [AnnotationToolbar] turns the current [PdfTextSelection] into a
+/// [AnnotationPanel] (a collapsible right-edge overlay, present in both
+/// normal and fullscreen mode — see its doc for why it replaced the old
+/// top `AnnotationToolbar`) turns the current [PdfTextSelection] into a
 /// [GraphNode] (see [_ReaderScreenState._createAnnotation]), and
 /// [AnnotationOverlay] (wired via `_PdfSurface`'s `pageOverlaysBuilder`)
-/// renders every such node back onto the page it was anchored to. See
-/// `features/reader/annotation_geometry.dart` for the pure quad-normalization/
-/// node-building logic these two lean on.
+/// renders every such node back onto the page it was anchored to. Tapping a
+/// rendered annotation opens [showAnnotationActionsPopover] right at the tap
+/// position for one-tap recolor/delete (see
+/// [_ReaderScreenState._onAnnotationTap]), with delete backed by a
+/// [ScaffoldMessenger] Undo (see [_ReaderScreenState._deleteAnnotationWithUndo]).
+/// See `features/reader/annotation_geometry.dart` for the pure quad-normalization/
+/// node-building logic these lean on.
 class ReaderScreen extends ConsumerStatefulWidget {
   const ReaderScreen({super.key, required this.book});
 
@@ -75,8 +92,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// reading continued on another device. See the class doc.
   static const _pullInterval = Duration(seconds: 30);
 
+  /// How long the floating zoom/axis/fullscreen control bar stays visible
+  /// after the last pointer activity over the reader surface — see
+  /// [_onReaderPointerActivity].
+  static const _controlsHideDelay = Duration(milliseconds: 2500);
+
   Timer? _dwellPushTimer;
   Timer? _pullTimer;
+  Timer? _controlsHideTimer;
 
   /// Guards the "on open" pull (see [_onViewerReady]) so it only ever runs
   /// once per reader session, even if pdfrx's `onViewerReady` callback were
@@ -88,27 +111,32 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// can be normalized (see `annotation_geometry.dart`).
   PdfDocument? _document;
 
-  /// The viewer's current text selection, mirrored here purely so the
-  /// toolbar's Highlight/Underline buttons know whether there's anything to
-  /// act on (see [AnnotationToolbar.canCreate]) — updated by
+  /// The viewer's current text selection, mirrored here purely so
+  /// [AnnotationPanel]'s Highlight/Underline buttons know whether there's
+  /// anything to act on (see [AnnotationPanel.canCreate]) — updated by
   /// [_onTextSelectionChange], which pdfrx calls on every selection change.
   PdfTextSelection? _textSelection;
 
   /// Index into [kAnnotationColors] — the color a new annotation is created
-  /// with, or (while [_selectedAnnotationId] is set) the color choice that
-  /// recolors the selected annotation on tap.
+  /// with (see [AnnotationPanel.selectedColorIndex]).
   int _selectedColorIndex = 0;
 
-  /// The id of the annotation last tapped via [AnnotationOverlay], if any —
-  /// non-null switches [AnnotationToolbar] into
-  /// [AnnotationToolbarMode.select] (delete/recolor) instead of its default
-  /// create-from-selection mode.
-  String? _selectedAnnotationId;
+  /// Whether [AnnotationPanel] is showing its expanded card — see that
+  /// widget's doc for the three ways this gets flipped (hover, tap the
+  /// handle, or a right-click anywhere on the reader, handled here via
+  /// [_onReaderPointerDown]).
+  bool _panelExpanded = false;
+
+  /// Whether the floating zoom/axis/fullscreen control bar (see
+  /// [_FloatingControlBar]) is currently visible. Starts visible so it's
+  /// discoverable on open, then fades per [_onReaderPointerActivity].
+  bool _controlsVisible = true;
 
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onControllerChanged);
+    _scheduleControlsAutoHide();
   }
 
   @override
@@ -120,10 +148,18 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
     _dwellPushTimer?.cancel();
     _pullTimer?.cancel();
+    _controlsHideTimer?.cancel();
     // Final push on close — fire-and-forget: `dispose()` can't be async, and
     // `_pushBookRow` itself no-ops quietly if sync isn't configured/signed
     // in, so this is always safe to call unconditionally.
     unawaited(_pushBookRow());
+    // Also fire one silent full sync (books/collections/boards/nodes/edges)
+    // so any highlights/underlines made this session reach Supabase without
+    // the user having to press "Sync notes" themselves — see the class doc's
+    // "Annotation sync" paragraph. `autoSync` is itself silent and no-ops
+    // quietly when unconfigured, so this is safe to fire unconditionally
+    // once `_canSync` is true.
+    if (_canSync) unawaited(ref.read(syncRunProvider.notifier).autoSync());
     if (_immersive) {
       // Best-effort: never leave the app (or the browser tab) stuck in
       // native fullscreen after navigating away from the reader.
@@ -135,7 +171,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void _onControllerChanged() {
     if (!_controller.isReady) return;
     _progressDebounce?.cancel();
-    _progressDebounce = Timer(const Duration(milliseconds: 400), _flushProgress);
+    _progressDebounce = Timer(
+      const Duration(milliseconds: 400),
+      _flushProgress,
+    );
 
     if (_canSync) {
       _dwellPushTimer?.cancel();
@@ -147,11 +186,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (!_controller.isReady) return;
     final pageNumber = _controller.pageNumber;
     if (pageNumber == null) return;
-    ref.read(libraryProvider.notifier).recordProgress(
-      widget.book.id,
-      currentPage: pageNumber,
-      pageCount: _controller.pageCount,
-    );
+    ref
+        .read(libraryProvider.notifier)
+        .recordProgress(
+          widget.book.id,
+          currentPage: pageNumber,
+          pageCount: _controller.pageCount,
+        );
   }
 
   /// True only when reading-position sync is actually usable right now: a
@@ -163,7 +204,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool get _canSync {
     final credentials = ref.read(syncCredentialsProvider);
     final auth = ref.read(authProvider);
-    return credentials.isConfigured && auth is AuthStateSignedIn && auth.canSync;
+    return credentials.isConfigured &&
+        auth is AuthStateSignedIn &&
+        auth.canSync;
   }
 
   /// Called by pdfrx once the document + controller are actually ready to
@@ -177,7 +220,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _pulledOnOpen = true;
     if (!_canSync) return;
     unawaited(_pullAndMaybeJump());
-    _pullTimer = Timer.periodic(_pullInterval, (_) => unawaited(_pullAndMaybeJump()));
+    _pullTimer = Timer.periodic(
+      _pullInterval,
+      (_) => unawaited(_pullAndMaybeJump()),
+    );
   }
 
   /// Pulls this one book's row from Supabase, merges it in via
@@ -241,7 +287,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   /// Mirrors the viewer's current text selection into [_textSelection] —
   /// called by pdfrx (see `_PdfSurface`'s `textSelectionParams`) on every
-  /// selection change, purely so [AnnotationToolbar] knows whether the
+  /// selection change, purely so [AnnotationPanel] knows whether the
   /// Highlight/Underline buttons have anything to act on.
   void _onTextSelectionChange(PdfTextSelection selection) {
     if (!mounted) return;
@@ -308,37 +354,31 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (mounted) setState(() => _textSelection = null);
   }
 
-  /// Selects annotation [node] (via [AnnotationOverlay]'s tap handler),
-  /// switching [AnnotationToolbar] into
-  /// [AnnotationToolbarMode.select] and pre-selecting its current color so a
-  /// follow-up swatch tap only changes color if the user actually picks a
-  /// different one.
-  void _onAnnotationTap(GraphNode node) {
-    if (!mounted) return;
-    setState(() {
-      _selectedAnnotationId = node.id;
-      final index = kAnnotationColors.indexOf(node.style.color ?? -1);
-      if (index != -1) _selectedColorIndex = index;
-    });
+  /// Handles a tap on a rendered highlight/underline (via
+  /// [AnnotationOverlay]'s `onAnnotationTap`) by opening
+  /// [showAnnotationActionsPopover] right at the tap position — see that
+  /// function's doc for why a one-tap contextual popover replaced the old
+  /// "tap selects, then use the toolbar" flow.
+  void _onAnnotationTap(GraphNode node, Offset globalPosition) {
+    showAnnotationActionsPopover(
+      context: context,
+      anchor: globalPosition,
+      node: node,
+      onRecolor: (colorIndex) => _recolorAnnotation(node.id, colorIndex),
+      onDelete: () => _deleteAnnotationWithUndo(node),
+    );
   }
 
-  void _deleteSelectedAnnotation() {
-    final id = _selectedAnnotationId;
-    if (id == null) return;
-    ref.read(graphNodesProvider.notifier).remove(id);
-    setState(() => _selectedAnnotationId = null);
-  }
-
-  /// Re-tags the selected annotation with [colorIndex]'s color, keeping the
+  /// Re-tags annotation [nodeId] with [colorIndex]'s color, keeping the
   /// kind-dependent opacity/stroke-width [annotationStyle] already assigns
   /// it (a highlight stays translucent, an underline stays a thin opaque
-  /// stroke) — only the color itself changes.
-  void _recolorSelectedAnnotation(int colorIndex) {
-    final id = _selectedAnnotationId;
-    if (id == null) return;
+  /// stroke) — only the color itself changes. Looks the node up fresh from
+  /// [graphNodesProvider] (rather than trusting the [GraphNode] captured at
+  /// tap time) in case it changed between the tap and the popover choice.
+  void _recolorAnnotation(String nodeId, int colorIndex) {
     GraphNode? node;
     for (final n in ref.read(graphNodesProvider)) {
-      if (n.id == id) {
+      if (n.id == nodeId) {
         node = n;
         break;
       }
@@ -353,22 +393,75 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             updatedAt: DateTime.now(),
           ),
         );
-    setState(() => _selectedColorIndex = colorIndex);
   }
 
-  /// Handles a swatch tap in either [AnnotationToolbar] mode: while an
-  /// annotation is selected it recolors that annotation; otherwise it just
-  /// changes which color a *new* annotation will be created with.
-  void _onColorTap(int index) {
-    if (_selectedAnnotationId != null) {
-      _recolorSelectedAnnotation(index);
-    } else {
-      setState(() => _selectedColorIndex = index);
-    }
+  /// Deletes [node] immediately (local + instant — annotation deletion isn't
+  /// a network round-trip, see the class doc's "Annotation sync" paragraph),
+  /// then offers a 5s [SnackBar] Undo that simply re-`upsert`s the captured
+  /// node — cheap to do since [GraphNode] is an immutable value already
+  /// fully in hand from the tap that opened the popover.
+  void _deleteAnnotationWithUndo(GraphNode node) {
+    ref.read(graphNodesProvider.notifier).remove(node.id);
+    final label = node.kind == NodeKind.highlight ? 'Highlight' : 'Underline';
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('$label deleted'),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () => ref.read(graphNodesProvider.notifier).upsert(node),
+          ),
+        ),
+      );
   }
 
-  void _closeAnnotationSelection() {
-    setState(() => _selectedAnnotationId = null);
+  /// Changes which color a *new* annotation will be created with — see
+  /// [AnnotationPanel.onColorTap].
+  void _onColorSelectedForCreate(int index) {
+    setState(() => _selectedColorIndex = index);
+  }
+
+  void _setPanelExpanded(bool expanded) {
+    if (_panelExpanded == expanded) return;
+    setState(() => _panelExpanded = expanded);
+  }
+
+  /// Resets the floating control bar's auto-hide timer — called on open and
+  /// on every reader pointer activity (see [_onReaderPointerActivity]).
+  void _scheduleControlsAutoHide() {
+    _controlsHideTimer?.cancel();
+    _controlsHideTimer = Timer(_controlsHideDelay, () {
+      if (mounted) setState(() => _controlsVisible = false);
+    });
+  }
+
+  /// Pointer movement/hover/tap anywhere over the reader surface (wired via
+  /// a [Listener], which observes raw pointer routing without competing
+  /// with pdfrx's own gesture arena — see [_FloatingControlBar]'s doc)
+  /// reveals the floating zoom/axis/fullscreen control bar and pushes its
+  /// auto-hide timer back out.
+  void _onReaderPointerActivity(PointerEvent _) {
+    if (!_controlsVisible) setState(() => _controlsVisible = true);
+    _scheduleControlsAutoHide();
+  }
+
+  /// A right mouse button press anywhere on the reader surface opens
+  /// [AnnotationPanel] — see that widget's doc for why this, unlike hover/
+  /// handle-tap, is handled here rather than inside the panel itself (the
+  /// panel has no visibility into taps on the rest of the reader). Detected
+  /// via the same [Listener] as [_onReaderPointerActivity] rather than
+  /// pdfrx's `PdfViewerParams.onSecondaryTapUp` — that field exists on
+  /// `PdfViewerParams` but isn't actually wired to anything in the installed
+  /// pdfrx 2.4.7 (verified against its source), so a raw pointer listener is
+  /// the reliable way to catch a right-click without depending on it. Touch
+  /// has no secondary button, so this is naturally a no-op there — and,
+  /// since a [Listener] never consumes the event, it never competes with
+  /// pdfrx's own long-press-to-select-text gesture either.
+  void _onReaderPointerDown(PointerEvent event) {
+    _onReaderPointerActivity(event);
+    if (event.buttons & kSecondaryButton != 0) _setPanelExpanded(true);
   }
 
   Future<void> _toggleImmersive() async {
@@ -391,7 +484,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final source = _source;
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.escape): _exitImmersiveIfActive,
+        const SingleActivator(LogicalKeyboardKey.escape):
+            _exitImmersiveIfActive,
         const SingleActivator(LogicalKeyboardKey.f11): _toggleImmersive,
       },
       child: Focus(
@@ -406,89 +500,85 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     tooltip: 'Back to library',
                     onPressed: () => Navigator.of(context).pop(),
                   ),
-                  title: Text(widget.book.title, overflow: TextOverflow.ellipsis),
-                  actions: source == null
-                      ? null
-                      : [
-                          IconButton(
-                            tooltip: 'Zoom out',
-                            icon: const Icon(Icons.zoom_out_rounded),
-                            onPressed: () => _controller.zoomDown(),
-                          ),
-                          IconButton(
-                            tooltip: 'Zoom in',
-                            icon: const Icon(Icons.zoom_in_rounded),
-                            onPressed: () => _controller.zoomUp(),
-                          ),
-                          IconButton(
-                            tooltip: _isHorizontal
-                                ? 'Switch to vertical scrolling'
-                                : 'Switch to horizontal page flip',
-                            icon: Icon(
-                              _isHorizontal
-                                  ? Icons.view_agenda_rounded
-                                  : Icons.view_carousel_rounded,
-                            ),
-                            onPressed: () => setState(() => _isHorizontal = !_isHorizontal),
-                          ),
-                          IconButton(
-                            tooltip: 'Enter fullscreen (F11)',
-                            icon: const Icon(Icons.fullscreen_rounded),
-                            onPressed: _toggleImmersive,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
+                  title: Text(
+                    widget.book.title,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
           body: source == null
               ? const _NoSourceView()
-              : Stack(
-                  children: [
-                    Column(
-                      children: [
-                        if (!_immersive)
-                          AnnotationToolbar(
-                            mode: _selectedAnnotationId != null
-                                ? AnnotationToolbarMode.select
-                                : AnnotationToolbarMode.create,
-                            selectedColorIndex: _selectedColorIndex,
-                            onColorTap: _onColorTap,
-                            canCreate: _textSelection?.hasSelectedText ?? false,
-                            onHighlight: () =>
-                                unawaited(_createAnnotation(NodeKind.highlight)),
-                            onUnderline: () =>
-                                unawaited(_createAnnotation(NodeKind.underline)),
-                            onDelete: _deleteSelectedAnnotation,
-                            onClose: _closeAnnotationSelection,
+              : Listener(
+                  onPointerDown: _onReaderPointerDown,
+                  onPointerHover: _onReaderPointerActivity,
+                  onPointerMove: _onReaderPointerActivity,
+                  child: Stack(
+                    children: [
+                      Column(
+                        children: [
+                          Expanded(
+                            child: _PdfSurface(
+                              source: source,
+                              controller: _controller,
+                              isHorizontal: _isHorizontal,
+                              initialPageNumber: widget.book.currentPage < 1
+                                  ? 1
+                                  : widget.book.currentPage,
+                              onViewerReady: _onViewerReady,
+                              bookId: widget.book.id,
+                              onSelectionChange: _onTextSelectionChange,
+                              onAnnotationTap: _onAnnotationTap,
+                            ),
                           ),
-                        Expanded(
-                          child: _PdfSurface(
-                            source: source,
-                            controller: _controller,
-                            isHorizontal: _isHorizontal,
-                            initialPageNumber: widget.book.currentPage < 1
-                                ? 1
-                                : widget.book.currentPage,
-                            onViewerReady: _onViewerReady,
-                            bookId: widget.book.id,
-                            onSelectionChange: _onTextSelectionChange,
-                            onAnnotationTap: _onAnnotationTap,
-                          ),
-                        ),
-                        if (!_immersive) PaginationBar(controller: _controller),
-                      ],
-                    ),
-                    if (_immersive)
+                          if (!_immersive)
+                            PaginationBar(controller: _controller),
+                        ],
+                      ),
                       Positioned(
                         top: 0,
+                        bottom: 0,
                         right: 0,
-                        child: SafeArea(
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: _ImmersiveExitButton(onPressed: _toggleImmersive),
+                        child: Center(
+                          child: AnnotationPanel(
+                            expanded: _panelExpanded,
+                            onExpandedChanged: _setPanelExpanded,
+                            selectedColorIndex: _selectedColorIndex,
+                            onColorTap: _onColorSelectedForCreate,
+                            canCreate: _textSelection?.hasSelectedText ?? false,
+                            onHighlight: () => unawaited(
+                              _createAnnotation(NodeKind.highlight),
+                            ),
+                            onUnderline: () => unawaited(
+                              _createAnnotation(NodeKind.underline),
+                            ),
                           ),
                         ),
                       ),
-                  ],
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: _immersive ? 16 : 74,
+                        child: Center(
+                          child: AnimatedOpacity(
+                            opacity: _controlsVisible ? 1 : 0,
+                            duration: const Duration(milliseconds: 220),
+                            child: IgnorePointer(
+                              ignoring: !_controlsVisible,
+                              child: _FloatingControlBar(
+                                isHorizontal: _isHorizontal,
+                                immersive: _immersive,
+                                onZoomOut: () => _controller.zoomDown(),
+                                onZoomIn: () => _controller.zoomUp(),
+                                onToggleAxis: () => setState(
+                                  () => _isHorizontal = !_isHorizontal,
+                                ),
+                                onToggleImmersive: _toggleImmersive,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
         ),
       ),
@@ -521,7 +611,7 @@ class _PdfSurface extends StatelessWidget {
   /// this one book's highlights/underlines.
   final String bookId;
   final PdfViewerTextSelectionChangeCallback onSelectionChange;
-  final ValueChanged<GraphNode> onAnnotationTap;
+  final AnnotationTapCallback onAnnotationTap;
 
   @override
   Widget build(BuildContext context) {
@@ -530,9 +620,22 @@ class _PdfSurface extends StatelessWidget {
       margin: 12,
       layoutPages: isHorizontal ? horizontalPdfPageLayout : null,
       onViewerReady: onViewerReady,
-      loadingBannerBuilder: (context, bytesDownloaded, totalBytes) => const Center(
-        child: CircularProgressIndicator(color: AppColors.accentPurple),
-      ),
+      // Opens the PDF fit-to-width instead of pdfrx's legacy "cover the
+      // viewport" default (which reads as too zoomed in on most books) —
+      // `PdfViewerSizeDelegateProviderSmart` is pdfrx's own documented
+      // replacement for the deprecated `calculateInitialZoom` parameter and
+      // explicitly "Defaults to Fit Width on initialization" (see its doc
+      // comment in pdfrx's source). Safe with the horizontal page-flip
+      // layout too: `onLayoutInitialized` only ever runs once, against
+      // whichever `layoutPages` is active at first load — and `isHorizontal`
+      // always starts false (see `_ReaderScreenState`), so the fit-width
+      // calculation always sees the normal single-page-wide vertical layout,
+      // never the horizontal layout's much wider filmstrip document size.
+      sizeDelegateProvider: const PdfViewerSizeDelegateProviderSmart(),
+      loadingBannerBuilder: (context, bytesDownloaded, totalBytes) =>
+          const Center(
+            child: CircularProgressIndicator(color: AppColors.accentPurple),
+          ),
       errorBannerBuilder: (context, error, stackTrace, documentRef) => Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -587,20 +690,75 @@ class _PdfSurface extends StatelessWidget {
   }
 }
 
-class _ImmersiveExitButton extends StatelessWidget {
-  const _ImmersiveExitButton({required this.onPressed});
+/// A floating, auto-hiding pill (see `_ReaderScreenState._controlsVisible`/
+/// [_ReaderScreenState._onReaderPointerActivity]) holding the controls that
+/// used to live in the `AppBar`: zoom out/in, the scroll-axis toggle, and
+/// fullscreen enter/exit. Moved out of the `AppBar` — which is hidden in
+/// immersive mode — and into this always-present overlay so fullscreen
+/// reading still has zoom/axis controls and a way back out, without
+/// permanently cluttering the screen the way a static bar would.
+class _FloatingControlBar extends StatelessWidget {
+  const _FloatingControlBar({
+    required this.isHorizontal,
+    required this.immersive,
+    required this.onZoomOut,
+    required this.onZoomIn,
+    required this.onToggleAxis,
+    required this.onToggleImmersive,
+  });
 
-  final VoidCallback onPressed;
+  final bool isHorizontal;
+  final bool immersive;
+  final VoidCallback onZoomOut;
+  final VoidCallback onZoomIn;
+  final VoidCallback onToggleAxis;
+  final VoidCallback onToggleImmersive;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.black.withValues(alpha: 0.45),
-      shape: const CircleBorder(),
-      child: IconButton(
-        tooltip: 'Exit fullscreen (Esc)',
-        icon: const Icon(Icons.fullscreen_exit_rounded, color: Colors.white),
-        onPressed: onPressed,
+      color: AppColors.panel.withValues(alpha: 0.92),
+      elevation: 8,
+      borderRadius: BorderRadius.circular(28),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              tooltip: 'Zoom out',
+              icon: const Icon(Icons.zoom_out_rounded),
+              onPressed: onZoomOut,
+            ),
+            IconButton(
+              tooltip: 'Zoom in',
+              icon: const Icon(Icons.zoom_in_rounded),
+              onPressed: onZoomIn,
+            ),
+            IconButton(
+              tooltip: isHorizontal
+                  ? 'Switch to vertical scrolling'
+                  : 'Switch to horizontal page flip',
+              icon: Icon(
+                isHorizontal
+                    ? Icons.view_agenda_rounded
+                    : Icons.view_carousel_rounded,
+              ),
+              onPressed: onToggleAxis,
+            ),
+            IconButton(
+              tooltip: immersive
+                  ? 'Exit fullscreen (Esc)'
+                  : 'Enter fullscreen (F11)',
+              icon: Icon(
+                immersive
+                    ? Icons.fullscreen_exit_rounded
+                    : Icons.fullscreen_rounded,
+              ),
+              onPressed: onToggleImmersive,
+            ),
+          ],
+        ),
       ),
     );
   }

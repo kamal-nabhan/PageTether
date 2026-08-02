@@ -24,6 +24,15 @@ import '../annotation_geometry.dart';
 /// with the viewer's own pan/zoom/text-selection gesture arena — see that
 /// class's doc in pdfrx) so tapping any line of a highlight/underline
 /// selects the whole annotation via [onAnnotationTap].
+///
+/// [onAnnotationTap] is called with the tap's *global* position (from
+/// `PdfOverlayInteractionRegion`'s `PdfOverlayInteractionDetails
+/// .globalPosition`) alongside the tapped node — `_ReaderScreenState` uses
+/// that position to anchor the recolor/delete popover right where the user
+/// tapped (see `showAnnotationActionsPopover`).
+typedef AnnotationTapCallback =
+    void Function(GraphNode node, Offset globalPosition);
+
 class AnnotationOverlay extends ConsumerWidget {
   const AnnotationOverlay({
     super.key,
@@ -43,7 +52,7 @@ class AnnotationOverlay extends ConsumerWidget {
   /// translation by [pageRectInViewer]'s origin is needed here.
   final Rect pageRectInViewer;
 
-  final ValueChanged<GraphNode> onAnnotationTap;
+  final AnnotationTapCallback onAnnotationTap;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -51,7 +60,8 @@ class AnnotationOverlay extends ConsumerWidget {
     final pageNumber = page.pageNumber;
     final relevant = [
       for (final node in nodes)
-        if ((node.kind == NodeKind.highlight || node.kind == NodeKind.underline) &&
+        if ((node.kind == NodeKind.highlight ||
+                node.kind == NodeKind.underline) &&
             node.anchor?.bookId == bookId &&
             node.anchor?.page == pageNumber)
           node,
@@ -97,7 +107,7 @@ class _AnnotationQuad extends StatelessWidget {
   final NormalizedRect quad;
   final PdfPage page;
   final Rect pageRectInViewer;
-  final ValueChanged<GraphNode> onTap;
+  final AnnotationTapCallback onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -106,7 +116,10 @@ class _AnnotationQuad extends StatelessWidget {
       pageWidth: page.width,
       pageHeight: page.height,
     );
-    final rect = pdfRect.toRect(page: page, scaledPageSize: pageRectInViewer.size);
+    final rect = pdfRect.toRect(
+      page: page,
+      scaledPageSize: pageRectInViewer.size,
+    );
     final color = Color(node.style.color ?? kAnnotationColors.first);
     final isHighlight = node.kind == NodeKind.highlight;
 
@@ -116,8 +129,8 @@ class _AnnotationQuad extends StatelessWidget {
       width: rect.width,
       height: rect.height,
       child: PdfOverlayInteractionRegion(
-        onTap: (_) {
-          onTap(node);
+        onTap: (details) {
+          onTap(node, details.globalPosition);
           return true;
         },
         child: isHighlight
